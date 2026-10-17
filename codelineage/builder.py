@@ -23,7 +23,8 @@ log = logging.getLogger(__name__)
 
 
 def _excluded(path: Path, root: Path, patterns: list[str]) -> bool:
-    rel = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+    # forward slashes on every OS, so graph paths and exclude patterns match on Windows too
+    rel = path.relative_to(root).as_posix() if path.is_relative_to(root) else path.as_posix()
     return any(fnmatch.fnmatch(rel, p) for p in patterns)
 
 
@@ -106,7 +107,7 @@ def build_graph(cfg: LineageConfig, bq_client=None) -> LineageGraph:
                 unresolved.append(f"{t.dag_id}.{t.task_id}: SQL file not found: {t.sql_file}")
         elif t.inline_sql:
             rel = Path(t.dag_file).resolve().relative_to(root)
-            units.append((f"{rel}::{t.task_id}", t.inline_sql, [t]))
+            units.append((f"{rel.as_posix()}::{t.task_id}", t.inline_sql, [t]))
 
     # 2. SQL files
     seen = set()
@@ -115,10 +116,10 @@ def build_graph(cfg: LineageConfig, bq_client=None) -> LineageGraph:
             if f in seen or _excluded(f, root, cfg.exclude):
                 continue
             seen.add(f)
-            units.append((str(f.relative_to(root)), f.read_text(encoding="utf-8", errors="replace"), tasks_by_file.get(f, [])))
+            units.append((f.relative_to(root).as_posix(), f.read_text(encoding="utf-8", errors="replace"), tasks_by_file.get(f, [])))
     for f, ts in tasks_by_file.items():  # referenced by DAGs but outside sql_paths
         if f not in seen:
-            units.append((str(f.relative_to(root)) if f.is_relative_to(root) else str(f), f.read_text(encoding="utf-8", errors="replace"), ts))
+            units.append((f.relative_to(root).as_posix() if f.is_relative_to(root) else f.as_posix(), f.read_text(encoding="utf-8", errors="replace"), ts))
 
     rendered = [(name, raw, renderer.render(raw, ts[0].params if ts else None), ts) for name, raw, ts in units]
 

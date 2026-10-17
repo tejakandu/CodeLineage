@@ -197,3 +197,10 @@ def test_cli_never_relies_on_the_platform_encoding(tmp_path):
     for args in (["build"], ["trace", "rpt_region_kpis", "total_revenue"], ["explore", "--out", str(tmp_path / "x.html")]):
         r = subprocess.run(base + args, capture_output=True, text=True, encoding="utf-8")
         assert r.returncode == 0, r.stderr[-2000:]
+
+
+def test_graph_paths_use_forward_slashes(graph):
+    """Paths are stored POSIX-style so a graph built on Windows works elsewhere (and in GCS)."""
+    files = {e["file"] for e in graph.edges} | {b["file"] for t in graph.tables.values() for b in t["built_by"]}
+    assert files and not any("\\" in f for f in files)
+    assert "dags/reporting_dag.py::customer_snapshot" in files
