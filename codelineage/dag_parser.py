@@ -58,6 +58,35 @@ def _find_sql_value(call: ast.Call):
     return None
 
 
+def _text(node) -> str | None:
+    """A string argument: a literal, or an f-string kept as written (f"load_{name}" -> "load_{name}")."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(v.value if isinstance(v, ast.Constant) else "{" + ast.unparse(v.value) + "}"
+                       for v in node.values)
+    return None
+
+
+_SQL_PATH = re.compile(r"^[\w.\-/\\{}$]+\.sql$", re.I)
+
+
+def _sql_literals(node: ast.AST) -> list[str]:
+    """.sql paths written anywhere inside a call or function: helpers, open(), os.path.join(...)."""
+    out = []
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "join" and \
+                isinstance(n.func, ast.Attribute) and getattr(n.func.value, "attr", "") == "path":
+            parts = [_text(a) for a in n.args]     # os.path.join(SQL_DIR, "mart", "x.sql") -> mart/x.sql
+            tail = [x for x in parts if x]
+            if tail and tail[-1].lower().endswith(".sql"):
+                out.append("/".join(tail))
+        v = _text(n)
+        if v and _SQL_PATH.match(v.strip()) and "{" not in v:
+            out.append(v.strip())
+    return list(dict.fromkeys(out))
+
+
 def _classify(value) -> tuple[str | None, str | None]:
     """Returns (sql_file, inline_sql) for a sql=... value."""
     if isinstance(value, list):
@@ -94,26 +123,41 @@ def parse_dag_file(path: Path) -> list[SqlTask]:
             p = _kw(node, "params")
             dag_params = _const(p) or {} if p is not None else {}
 
-    for node in ast.walk(tree):
-        call, target = None, None
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-            call = node.value
-            target = node.targets[0].id if isinstance(node.targets[0], ast.Name) else None
-        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-            call = node.value
-        if call is None or _kw(call, "task_id") is None:
-            continue
-        task_id = _const(_kw(call, "task_id"))
-        if not isinstance(task_id, str):
-            continue
-        if target:
-            var_to_task[target] = task_id
-        sql_file, inline = _classify(_find_sql_value(call))
-        if not (sql_file or inline):
-            continue
-        p = _kw(call, "params")
-        params = {**(dag_params if isinstance(dag_params, dict) else {}), **((_const(p) or {}) if p is not None else {})}
+    dag_params = dag_params if isinstance(dag_params, dict) else {}
+    seen: set[tuple[str, str | None]] = set()
+
+    def add(task_id: str, value, call: ast.Call | None, scope: ast.AST) -> None:
+        if value is None:                 # sql passed through a helper, open(), os.path.join(), ...
+            literals = _sql_literals(scope)
+            value = literals[0] if literals else None
+        sql_file, inline = _classify(value)
+        if not (sql_file or inline) or (task_id, sql_file or inline) in seen:
+            return
+        seen.add((task_id, sql_file or inline))
+        p = _kw(call, "params") if call is not None else None
+        params = {**dag_params, **((_const(p) or {}) if p is not None else {})}
         tasks.append(SqlTask(dag_id, task_id, str(path), schedule, sql_file, inline, params))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and _kw(node.value, "task_id"):
+            tid = _text(_kw(node.value, "task_id"))
+            for t in node.targets:
+                if isinstance(t, ast.Name) and tid:
+                    var_to_task[t.id] = tid
+        # classic operators: any call with task_id=..., wherever it appears (assigned, in lists, chains)
+        if isinstance(node, ast.Call) and _kw(node, "task_id") is not None:
+            tid = _text(_kw(node, "task_id"))
+            if tid:
+                add(tid, _find_sql_value(node), node, node)
+        # TaskFlow: @task / @task.bigquery functions that run a .sql file
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for dec in node.decorator_list:
+                d = dec.func if isinstance(dec, ast.Call) else dec
+                name = d.attr if isinstance(d, ast.Attribute) else getattr(d, "id", "")
+                root = d.value.id if isinstance(d, ast.Attribute) and isinstance(d.value, ast.Name) else name
+                if root == "task":
+                    tid = _text(_kw(dec, "task_id")) if isinstance(dec, ast.Call) and _kw(dec, "task_id") else node.name
+                    add(tid, None, dec if isinstance(dec, ast.Call) else None, node)
 
     # Task dependencies from `a >> b`, `[a, b] >> c`, `a << b`
     deps: dict[str, set[str]] = {}

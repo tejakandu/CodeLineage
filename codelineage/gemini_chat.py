@@ -13,7 +13,7 @@ import time
 import uuid
 
 from .telemetry import InteractionLogger, ToolRecorder, traced_columns
-from .tools import SYSTEM_PROMPT, LineageService
+from .tools import SYSTEM_PROMPT, LineageService, ungrounded_names
 
 # Stable Flash: strong tool calling, fast, cheap. Override with CODELINEAGE_MODEL; check
 # https://cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions for retirement dates.
@@ -33,6 +33,7 @@ class LineageChat:
         self.model = model or os.environ.get("CODELINEAGE_MODEL", DEFAULT_MODEL)
         self.logger, self.surface, self.user_id = logger, surface, user_id
         self.session_id = session_id or uuid.uuid4().hex
+        self.service = service
         self.graph_built_at = service.graph.data.get("built_at")
         self.recorder = ToolRecorder()
         self.last_interaction_id: str | None = None
@@ -41,7 +42,7 @@ class LineageChat:
             system_instruction=SYSTEM_PROMPT,
             tools=[self.recorder.wrap(f) for f in service.tool_functions()],
             temperature=0.1,
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=15),
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=25),
         )
         self.chat = self.client.chats.create(model=self.model, config=self.config)
 
@@ -52,8 +53,22 @@ class LineageChat:
         start, answer, error, usage = time.monotonic(), None, None, None
         try:
             response = self.chat.send_message(question)
+            if not _text(response):
+                from google.genai import types
+                # The model stopped mid-way through tool calls (e.g. the call limit): ask it to answer
+                # from what it already gathered, with tools switched off.
+                response = self.chat.send_message(
+                    "Answer the question now, using only the tool results above. Do not call more tools.",
+                    config=self.config.model_copy(update={
+                        "tools": None, "automatic_function_calling": None,
+                        "tool_config": types.ToolConfig(function_calling_config=types.FunctionCallingConfig(
+                            mode=types.FunctionCallingConfigMode.NONE))}))
             usage = getattr(response, "usage_metadata", None)
-            answer = response.text or "(no answer)"
+            answer = _text(response) or "(no answer: Gemini did not return text; try rephrasing the question)"
+            unknown = ungrounded_names(answer, self.service)
+            if unknown:
+                answer += ("\n\n> ⚠ Not found in the lineage graph, verify before relying on it: "
+                           + ", ".join(f"`{u}`" for u in unknown[:15]))
             return answer
         except Exception as e:  # noqa: BLE001
             error = f"{type(e).__name__}: {e}"
@@ -77,3 +92,12 @@ class LineageChat:
             self.logger.log("feedback", interaction_id=interaction_id, session_id=self.session_id,
                             surface=self.surface, user_id=self.user_id,
                             feedback_rating=rating, feedback_comment=comment)
+
+
+def _text(response) -> str:
+    """Text parts only; no SDK warning when the response also holds function calls."""
+    try:
+        parts = response.candidates[0].content.parts or []
+    except (AttributeError, IndexError, TypeError):
+        return getattr(response, "text", None) or ""
+    return "".join(p.text for p in parts if getattr(p, "text", None)).strip()

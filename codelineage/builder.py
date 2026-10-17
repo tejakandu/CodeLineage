@@ -82,9 +82,11 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
 
     # 1. DAGs -> which task runs which SQL
     tasks: list[SqlTask] = []
+    dag_files = 0
     io_warnings: list[str] = []
     for d in cfg.resolve(cfg.dag_paths):
         for f in walk_files(d, ".py", root, cfg.exclude, io_warnings):
+            dag_files += 1
             tasks.extend(parse_dag_file(f))
 
     def resolve_template(ref: str) -> Path | None:
@@ -212,4 +214,6 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
         "schema": {t: {**ddl.get(t, {}), **info_schema.get(t, {})} for t in sorted(used)
                    if t in info_schema or t in ddl},
         "warnings": warnings,
+        "dag_scan": {"files": dag_files, "sql_tasks": len(tasks),
+                     "linked": sum(1 for t in tasks if t.inline_sql) + sum(len(v) for v in tasks_by_file.values())},
     })

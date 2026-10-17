@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -129,10 +130,13 @@ class LineageService:
             self.graph.render_tree(tree, direction),
             "",
             "FILTERS / JOINS applied when building each table:",
-            json.dumps({k: v for k, v in filters.items() if v}, indent=2),
+            json.dumps({k: v for k, v in filters.items() if v}, indent=2)
+            if any(filters.values()) else "none found in the parsed SQL",
             "",
             "AIRFLOW TASKS (dag.task (schedule)):",
-            json.dumps({k: v for k, v in schedules.items() if v}, indent=2),
+            json.dumps({k: v for k, v in schedules.items() if v}, indent=2) if any(schedules.values())
+            else "none found: these tables are not linked to any parsed Airflow DAG task "
+                 "(write '-' for DAG.task; do not name a DAG or task)",
             "",
             "MERMAID:",
             "```mermaid",
@@ -236,4 +240,41 @@ How to work:
 5. Tables named like "path/file.sql::tmp_x" are temp tables that exist only inside that script.
 6. If a column has "no source column" it is derived from a constant or row count such as COUNT(*);
    say so. If the tool output shows truncation, offer to go deeper.
+
+Grounding rules (most important):
+- Every table, column, file path, DAG, task, schedule, filter and SQL expression you mention must
+  appear in the tool output of this conversation. Copy names exactly; never construct a plausible one.
+- If the tool output says none were found (e.g. no Airflow task), say so or write "-". Do not guess.
+- Do not present general or vendor knowledge (e.g. typical Guidewire, Fivetran or CDC conventions) as
+  facts about this pipeline. If it helps, add it after the answer under "Notes (interpretation, not
+  from the code)".
 Keep it concise and factual."""
+
+
+_CODE_SPAN = re.compile(r"`([^`\n]+)`")
+_FENCE = re.compile(r"```.*?```", re.S)
+_NAME = re.compile(r"^[A-Za-z_][\w$-]*(\.[A-Za-z_][\w$-]*)+$")
+
+
+def ungrounded_names(answer: str, service: "LineageService") -> list[str]:
+    """Backticked table/column names and file paths in an answer that the lineage graph doesn't know.
+    Catches names an LLM made up; aliases like `o.amount` pass when the column exists."""
+    graph = service.graph
+    tables = set(graph.all_tables())
+    suffixes = {t.split(".", i)[-1] for t in tables for i in range(t.count(".") + 1)}
+    columns = {c for t in tables for c in graph.columns(t)}
+    files = {f.split("::")[0] for f in {e["file"] for e in graph.edges}
+             | {b["file"] for t in graph.tables.values() for b in t.get("built_by", [])}}
+    files |= {b["dag_file"] for t in graph.tables.values() for b in t.get("built_by", []) if b.get("dag_file")}
+    unknown = []
+    for raw in _CODE_SPAN.findall(_FENCE.sub("", answer)):
+        token = raw.strip().strip("`'\"").lower()
+        if "/" in token and token.endswith((".sql", ".py")):
+            path = token.split("::")[0].split(":")[0]
+            if path not in files and not any(f.endswith(path) for f in files) and service.read_file(path) is None:
+                unknown.append(raw)
+        elif _NAME.match(token):
+            if token in suffixes or token.rsplit(".", 1)[-1] in columns:
+                continue
+            unknown.append(raw)
+    return list(dict.fromkeys(unknown))

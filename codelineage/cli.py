@@ -119,6 +119,14 @@ def _main(argv: list[str] | None = None) -> int:
         warnings = graph.data["warnings"]
         print(f"Wrote {path}: {len(graph.tables)} built tables, {len(graph.all_tables())} total, "
               f"{len(graph.edges)} column edges, {len(warnings)} warnings")
+        scan = graph.data.get("dag_scan") or {}
+        if cfg.dag_paths:
+            print(f"DAGs: {scan.get('files', 0)} files scanned, {scan.get('sql_tasks', 0)} SQL tasks found, "
+                  f"{scan.get('linked', 0)} linked to SQL files")
+            if scan.get("files") and not scan.get("linked"):
+                print("  NOTE: no DAG task could be linked to SQL. Check dag_paths / template_searchpath, or "
+                      "tell us how your DAGs reference SQL (e.g. sql=..., read_sql(...), open(...)).",
+                      file=sys.stderr)
         if warnings:
             report = path.with_name("warnings.txt")
             report.write_text("\n".join(warnings) + "\n", encoding="utf-8")

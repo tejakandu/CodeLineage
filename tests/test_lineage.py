@@ -354,3 +354,32 @@ def test_repeated_column_failures_become_one_warning():
     ws = [f"column c{i}: Cannot find column 'c{i}' in query." for i in range(8)] + ["something else"]
     out = _collapse(ws)
     assert len(out) == 2 and out[1].startswith("8 columns (c0, c1, c2, c3, c4, ...): Cannot find column '<col>'")
+
+
+def test_dag_patterns_beyond_literal_sql_argument(tmp_path):
+    dag = tmp_path / "patterns_dag.py"
+    dag.write_text('''
+import os
+from airflow import DAG
+from airflow.decorators import task
+SQL_DIR = "/opt/airflow/sql"
+
+def read_sql(name):
+    return open(os.path.join(SQL_DIR, name)).read()
+
+with DAG("claims_daily", schedule="0 2 * * *") as dag:
+    a = BigQueryInsertJobOperator(task_id="load_a",
+        configuration={"query": {"query": read_sql("mart/a.sql"), "useLegacySql": False}})
+    b = BigQueryExecuteQueryOperator(task_id="load_b", sql=open(os.path.join(SQL_DIR, "mart", "b.sql")).read())
+    tasks = [SQLExecuteQueryOperator(task_id=f"load_{n}", sql=f"{n}.sql") for n in ["c", "d"]]
+
+    @task(task_id="run_e")
+    def run_e():
+        client.query(open("/opt/airflow/sql/mart/e.sql").read())
+
+    a >> b
+''', encoding="utf-8")
+    from codelineage.dag_parser import parse_dag_file
+    found = {t.task_id: t.sql_file for t in parse_dag_file(dag)}
+    assert found == {"load_a": "mart/a.sql", "load_b": "mart/b.sql", "run_e": "/opt/airflow/sql/mart/e.sql"}
+    assert all(t.dag_id == "claims_daily" and t.schedule == "0 2 * * *" for t in parse_dag_file(dag))
