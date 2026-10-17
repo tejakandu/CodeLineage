@@ -74,6 +74,10 @@ class LineageGraph:
               [col_key(t, c) for t, c in everything if pattern in col_key(t, c)]
         return out[:limit]
 
+    def column_info(self, table: str, column: str) -> dict:
+        """Type/description from INFORMATION_SCHEMA, if it was loaded."""
+        return self.data.get("schema", {}).get(table, {}).get(column, {})
+
     def is_source(self, table: str) -> bool:
         return table not in self.tables
 
@@ -93,7 +97,7 @@ class LineageGraph:
             links = []
             for e in index.get(key, []):
                 nt, nc = (e["source_table"], e["source_column"]) if direction == "upstream" else (e["target_table"], e["target_column"])
-                link = {k: e.get(k) for k in ("transformation", "steps", "file", "line", "dag_id", "task_id", "statement_type")}
+                link = {k: e.get(k) for k in ("transformation", "steps", "file", "line", "dag_id", "task_id", "statement_type", "ambiguous")}
                 if direction == "downstream":
                     link["transformation"] = e["transformation"]
                 link["node"] = build(nt, nc, depth + 1, path | {key}) if nt else {"constant": True}
@@ -120,10 +124,17 @@ class LineageGraph:
         return build(table, 0, frozenset())
 
     # ---------- rendering ----------
-    @staticmethod
-    def render_tree(tree: dict, direction: str = "upstream") -> str:
+    def render_tree(self, tree: dict, direction: str = "upstream") -> str:
         key = "upstream" if direction == "upstream" else "downstream"
-        lines = [f"{tree['table']}.{tree['column']}"]
+
+        def about(table: str, column: str) -> str:
+            info = self.column_info(table, column)
+            bits = [info["type"]] if info.get("type") else []
+            if info.get("description"):
+                bits.append(f'"{info["description"]}"')
+            return f"  ({' · '.join(bits)})" if bits else ""
+
+        lines = [f"{tree['table']}.{tree['column']}{about(tree['table'], tree['column'])}"]
 
         def where(link: dict) -> str:
             bits = []
@@ -145,6 +156,9 @@ class LineageGraph:
                     label = f"{child['table']}.{child['column']}"
                     if child.get("is_source_table") and direction == "upstream":
                         label += "  ◆ SOURCE"
+                    label += about(child["table"], child["column"])
+                    if link.get("ambiguous"):
+                        label += "  ⚠ AMBIGUOUS (unqualified column; source table not certain)"
                     if child.get("cycle"):
                         label += "  (cycle)"
                     if child.get("truncated"):

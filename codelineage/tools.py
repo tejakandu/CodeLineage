@@ -70,6 +70,9 @@ class LineageService:
             return err
         info = self.graph.tables.get(t)
         out = {"table": t, "columns": self.graph.columns(t)}
+        details = self.graph.data.get("schema", {}).get(t)
+        if details:
+            out["column_details"] = details
         if info:
             out["built_by"] = info["built_by"]
         else:
@@ -193,6 +196,10 @@ How to work:
    **Filters & joins** that affect the values (e.g. status = 'COMPLETE').
    **Source tables** - the raw tables at the end of the chain (marked SOURCE).
    **Diagram** - repeat the mermaid block from the tool output unchanged.
-4. If a column has "no source column" it is derived from a constant or row count such as COUNT(*);
+4. Column types and descriptions from the warehouse INFORMATION_SCHEMA appear in parentheses; use
+   them to explain columns in business terms. Hops marked AMBIGUOUS are best guesses (unqualified
+   column in a join with no schema): say so explicitly.
+5. Tables named like "path/file.sql::tmp_x" are temp tables that exist only inside that script.
+6. If a column has "no source column" it is derived from a constant or row count such as COUNT(*);
    say so. If the tool output shows truncation, offer to go deeper.
 Keep it concise and factual."""

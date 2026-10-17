@@ -1,0 +1,24 @@
+table_catalog,table_schema,table_name,column_name,ordinal_position,data_type,description
+acme-prod,raw,orders,order_id,1,STRING,Order identifier from the OLTP system
+acme-prod,raw,orders,customer_id,2,STRING,Customer who placed the order
+acme-prod,raw,orders,order_ts,3,TIMESTAMP,Time the order was placed (UTC)
+acme-prod,raw,orders,currency_code,4,STRING,ISO currency of the order
+acme-prod,raw,orders,gross_amount,5,NUMERIC,Order amount before discounts in local currency
+acme-prod,raw,orders,discount_amount,6,NUMERIC,Total discount applied in local currency
+acme-prod,raw,orders,status,7,STRING,"Order status (NEW, COMPLETE, CANCELLED, TEST)"
+acme-prod,raw,customers,customer_id,1,STRING,Customer identifier
+acme-prod,raw,customers,customer_name,2,STRING,Legal or display name
+acme-prod,raw,customers,country_code,3,STRING,ISO country
+acme-prod,raw,customers,updated_at,4,TIMESTAMP,Last update time of the record
+acme-prod,raw,payments,payment_id,1,STRING,Payment identifier
+acme-prod,raw,payments,order_id,2,STRING,Order the payment belongs to
+acme-prod,raw,payments,method_id,3,INT64,Payment method key
+acme-prod,raw,payments,amount_cents,4,INT64,Captured amount in USD cents
+acme-prod,raw,payments,card_number,5,STRING,PCI - masked downstream
+acme-prod,raw,payment_methods,method_id,1,INT64,Payment method key
+acme-prod,raw,payment_methods,method_name,2,STRING,"Card, PayPal, bank transfer, ..."
+acme-prod,ref,fx_rates_daily,rate_date,1,DATE,
+acme-prod,ref,fx_rates_daily,currency_code,2,STRING,
+acme-prod,ref,fx_rates_daily,usd_rate,3,NUMERIC,Units of USD per 1 unit of currency_code (end-of-day)
+acme-prod,ref,country_region_map,country_code,1,STRING,
+acme-prod,ref,country_region_map,region_name,2,STRING,Sales region

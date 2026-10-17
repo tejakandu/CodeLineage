@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import fnmatch
-import json
 import logging
 import re
 from dataclasses import asdict
@@ -14,6 +13,7 @@ import yaml
 from .config import LineageConfig
 from .dag_parser import SqlTask, parse_dag_file
 from .graph import LineageGraph
+from .schema import load_information_schema, to_sqlglot_schema
 from .sql_parser import StatementLineage, parse_sql
 from .templating import SqlRenderer, load_config_values
 
@@ -32,15 +32,13 @@ def _statement_line(raw: str, target: str) -> int | None:
     return raw.count("\n", 0, m.start()) + 1 if m else None
 
 
-def _build_schema(statements: list[StatementLineage], extra: dict) -> dict:
-    """sqlglot schema ({db: {table: {col: type}}}) from what earlier statements produce."""
-    schema: dict = json.loads(json.dumps(extra)) if extra else {}
+def _inferred_columns(statements: list[StatementLineage]) -> dict[str, dict]:
+    """Columns each built table produces, as learned from the SQL itself."""
+    out: dict[str, dict] = {}
     for s in statements:
-        parts = s.target_table.split(".")
-        if len(parts) != 2 or not s.columns:
-            continue
-        schema.setdefault(parts[0], {}).setdefault(parts[1], {c: "UNKNOWN" for c in s.columns})
-    return schema
+        if s.columns:
+            out.setdefault(s.target_table, {}).update({c: {} for c in s.columns})
+    return out
 
 
 def build_graph(cfg: LineageConfig) -> LineageGraph:
@@ -98,23 +96,26 @@ def build_graph(cfg: LineageConfig) -> LineageGraph:
 
     rendered = [(name, raw, renderer.render(raw, ts[0].params if ts else None), ts) for name, raw, ts in units]
 
-    extra_schema = {}
-    # 3. Two passes: the first learns each table's output columns so the second can expand SELECT *.
-    first = [s for _, _, sql, _ in rendered for s in parse_sql(sql, cfg.dialect, None, cfg.drop_catalog)]
-    schema = _build_schema(first, extra_schema)
+    # 3. Schema: the warehouse INFORMATION_SCHEMA (authoritative) plus columns inferred from the SQL.
+    #    A first parse pass learns each built table's columns so the second can expand SELECT *.
+    info_schema = load_information_schema(cfg.resolve(cfg.schema_files), cfg.drop_catalog)
+    first = [s for name, _, sql, _ in rendered for s in parse_sql(sql, cfg.dialect, None, cfg.drop_catalog, name)]
+    schema = to_sqlglot_schema(info_schema, _inferred_columns(first))
 
     tables: dict[str, dict] = {}
     edges: list[dict] = []
     warnings: list[str] = list(unresolved)
     for name, raw, sql, ts in rendered:
-        statements = parse_sql(sql, cfg.dialect, schema, cfg.drop_catalog)
-        if not statements and re.search(r"\b(insert|create|merge)\b", sql, re.I):
+        statements = parse_sql(sql, cfg.dialect, schema, cfg.drop_catalog, name)
+        if not statements and re.search(r"\b(insert|create|merge|update)\b", sql, re.I):
             warnings.append(f"{name}: no lineage extracted (unsupported or unparseable SQL)")
         for s in statements:
-            line = _statement_line(raw, s.target_table)
+            line = s.line or _statement_line(raw, s.target_table)
             runs = [{"dag_id": t.dag_id, "task_id": t.task_id, "schedule": t.schedule,
                      "upstream_tasks": t.upstream_tasks} for t in ts] or [{}]
             info = tables.setdefault(s.target_table, {"columns": [], "built_by": []})
+            if s.is_temp:
+                info["temp"] = True
             info["columns"] = sorted(set(info["columns"]) | set(s.columns))
             for run in runs:
                 info["built_by"].append({"file": name, "line": line, "statement_type": s.statement_type,
@@ -123,13 +124,27 @@ def build_graph(cfg: LineageConfig) -> LineageGraph:
                     edges.append({**asdict(e), "file": name, "line": line,
                                   "statement_type": s.statement_type,
                                   "dag_id": run.get("dag_id"), "task_id": run.get("task_id")})
-            warnings.extend(f"{name}: {w}" for w in s.warnings)
+            warnings.extend(f"{name}:{line}: {w}" for w in s.warnings)
 
+    # 4. Check the SQL against the warehouse: columns that don't exist usually mean stale SQL,
+    #    a typo, or a table that is missing from the export.
+    if info_schema:
+        missing = sorted({(e["source_table"], e["source_column"], e["file"]) for e in edges
+                          if e.get("source_table") in info_schema and not e.get("ambiguous")
+                          and e["source_column"] not in info_schema[e["source_table"]]})
+        warnings += [f"{f}: {t}.{c} not found in INFORMATION_SCHEMA" for t, c, f in missing]
+        referenced = {e["source_table"] for e in edges if e.get("source_table")}
+        unknown = sorted(t for t in referenced - set(info_schema) - set(tables) if "::" not in t)
+        if unknown:
+            warnings.append(f"{len(unknown)} source tables not in INFORMATION_SCHEMA: {', '.join(unknown[:20])}")
+
+    used = {e["source_table"] for e in edges if e.get("source_table")} | {e["target_table"] for e in edges} | set(tables)
     return LineageGraph({
         "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "repo_root": str(root),
         "dialect": cfg.dialect,
         "tables": tables,
         "edges": edges,
+        "schema": {t: info_schema[t] for t in sorted(used) if t in info_schema},
         "warnings": warnings,
     })

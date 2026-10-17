@@ -15,6 +15,7 @@ class LineageConfig:
     dag_paths: list[str] = field(default_factory=list)
     config_paths: list[str] = field(default_factory=list)
     template_searchpath: list[str] = field(default_factory=list)
+    schema_files: list[str] = field(default_factory=list)   # INFORMATION_SCHEMA.COLUMNS exports
     exclude: list[str] = field(default_factory=list)
     drop_catalog: bool = True
     variables: dict = field(default_factory=dict)

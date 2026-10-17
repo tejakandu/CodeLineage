@@ -100,6 +100,7 @@ sql_paths: [sql]
 dag_paths: [dags]
 config_paths: [config]       # YAML/JSON values available to Jinja as params.x, var.value.x, x
 template_searchpath: [sql]   # where DAG sql="x.sql" / {% include %} paths are resolved
+schema_files: [metadata/information_schema_columns.csv]   # INFORMATION_SCHEMA.COLUMNS export
 exclude: ["sql/scratch/*"]
 drop_catalog: true           # project.dataset.table == dataset.table
 variables: { ds: "2024-01-01" }
@@ -112,12 +113,19 @@ SQL references it couldn't resolve. Fix those by adding variables or paths.
 `.lineage/graph.json` somewhere everyone can read it (commit it, or put it in GCS and set
 `CODELINEAGE_GRAPH`). The MCP server and chat only read the graph, so answers come back fast.
 
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how parsing and storage work, the graph
+format, and the full complex-SQL coverage table.
+
 ## What it handles
 
 - `CREATE [OR REPLACE] TABLE/VIEW … AS SELECT`, `INSERT INTO t (cols) SELECT …` (matched by
-  position), `MERGE … WHEN MATCHED UPDATE / WHEN NOT MATCHED INSERT`
-- CTEs, nested subqueries, aliases, `UNION`, window functions, `SELECT *` (expanded from tables
-  built earlier in the repo)
+  position), `MERGE … WHEN MATCHED UPDATE / WHEN NOT MATCHED INSERT`, `UPDATE … SET … FROM`
+- Multi-statement scripts, TEMP tables (scoped per file), stored procedures and `BEGIN/IF/LOOP`
+  blocks (DML inside is recovered), one bad statement never loses the rest of the file
+- CTEs, nested/scalar subqueries, aliases, `UNION`, `CASE`, window functions, `QUALIFY`, `UNNEST`,
+  `SELECT *` / `* EXCEPT` (expanded from INFORMATION_SCHEMA or tables built in the repo)
+- **INFORMATION_SCHEMA**: resolves unqualified columns in joins (otherwise flagged ⚠ AMBIGUOUS),
+  adds column types/descriptions to answers, and warns about SQL that references missing columns
 - Jinja / Airflow templating (`{{ params.x }}`, `{{ var.value.x }}`, `{{ ds }}`, `{% include %}`)
 - Airflow DAGs read statically, never imported: `sql=` / `query=` / `BigQueryInsertJobOperator`
   `configuration.query.query`, file references or inline SQL, DAG id, schedule, task dependencies
@@ -126,15 +134,15 @@ SQL references it couldn't resolve. Fix those by adding variables or paths.
 
 **Not covered (yet):** SQL assembled at runtime in Python (f-strings), stored procedures and dynamic
 `EXECUTE IMMEDIATE`, and transforms that happen outside SQL (Spark/pandas). These show up in the
-build warnings or appear as tables with no upstream. Ideas for next steps: a `schema_files` option
-fed from `INFORMATION_SCHEMA` for better `SELECT *` handling, dbt `manifest.json` ingestion, and
-column descriptions from a data catalog.
+build warnings or appear as tables with no upstream. Ideas for next steps: SQLite/BigQuery storage
+with incremental rebuilds for very large repos, and dbt `manifest.json` ingestion.
 
 ## Layout
 
 ```
 codelineage/
   config.py        lineage.yaml loader
+  schema.py        INFORMATION_SCHEMA export loader
   templating.py    Jinja/Airflow rendering with config values
   dag_parser.py    Airflow DAG → SQL task mapping (ast)
   sql_parser.py    sqlglot column-level lineage per statement
