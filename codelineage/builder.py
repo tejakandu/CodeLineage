@@ -33,10 +33,11 @@ def _statement_line(raw: str, target: str) -> int | None:
 
 
 def _inferred_columns(statements: list[StatementLineage]) -> dict[str, dict]:
-    """Columns each built table produces, as learned from the SQL itself."""
+    """Columns of tables the repo creates with CREATE ... AS SELECT. INSERT / MERGE / UPDATE only
+    name some of a table's columns, so treating them as the full column list breaks lineage."""
     out: dict[str, dict] = {}
     for s in statements:
-        if s.columns:
+        if s.columns and s.statement_type.startswith("CREATE"):
             out.setdefault(s.target_table, {}).update({c: {} for c in s.columns})
     return out
 
@@ -147,11 +148,13 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
         for t, cols in _bigquery_schema(cfg, early_warnings, bq_client).items():
             for c, info in cols.items():
                 info_schema.setdefault(t, {}).setdefault(c, info)
-    first = []
+    first, ddl = [], {}
     for i, (name, _, sql, _) in enumerate(rendered, 1):
         report("reading columns", i, len(rendered), name)
-        first += parse_sql(sql, cfg.dialect, None, cfg.drop_catalog, name, columns_only=True)
-    schema = to_sqlglot_schema(info_schema, _inferred_columns(first))
+        first += parse_sql(sql, cfg.dialect, None, cfg.drop_catalog, name, columns_only=True, ddl=ddl)
+    # Schema sources, best first: warehouse INFORMATION_SCHEMA, CREATE TABLE DDL in the repo, then
+    # columns of tables the repo creates with CREATE ... AS SELECT.
+    schema = to_sqlglot_schema(info_schema, ddl, _inferred_columns(first))
     schema = ensure_schema(schema, dialect=cfg.dialect) if schema else None   # built once, reused
 
     tables: dict[str, dict] = {}
@@ -206,6 +209,7 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
         "config_file": str(cfg.config_file) if cfg.config_file else None,
         "tables": tables,
         "edges": edges,
-        "schema": {t: info_schema[t] for t in sorted(used) if t in info_schema},
+        "schema": {t: {**ddl.get(t, {}), **info_schema.get(t, {})} for t in sorted(used)
+                   if t in info_schema or t in ddl},
         "warnings": warnings,
     })

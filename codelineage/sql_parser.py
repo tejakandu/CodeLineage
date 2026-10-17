@@ -122,7 +122,8 @@ def _column_root(col: str, query: exp.Query, schema: Schema | None, dialect, war
         # without the schema rather than lose the column's lineage.
         try:
             root = lineage(col, query, schema={}, dialect=dialect, trim_selects=False)
-            warnings.append(f"column {col}: resolved without schema ({e}); INFORMATION_SCHEMA may be stale")
+            warnings.append(f"column {col}: resolved without schema ({_first_line(e)}); the schema may be "
+                            "missing columns (stale INFORMATION_SCHEMA or DDL)")
             return root
         except Exception as e2:  # noqa: BLE001
             warnings.append(f"column {col}: {e2}")
@@ -136,11 +137,23 @@ def _query_lineage(target: str, query: exp.Query, columns: list[str], schema: Sc
     # per-column call re-analyses the whole query each time, which is slow on wide tables.
     # trim_selects=False skips building a trimmed copy of every CTE per hop (only used for display
     # by sqlglot; the edges are identical) and is ~15x faster on CTE-heavy SQL.
+    def trace_all(sch):
+        return {k.lower(): v for k, v in lineage(None, query, schema=sch or {}, dialect=dialect,
+                                                 trim_selects=False).items()}
     try:
-        roots = {k.lower(): v for k, v in lineage(None, query, schema=schema or {}, dialect=dialect,
-                                                    trim_selects=False).items()}
-    except Exception:  # noqa: BLE001 - fall back to column by column
+        roots = trace_all(schema)
+    except Exception as e:  # noqa: BLE001
         roots = {}
+        if schema is not None:
+            # Usually the schema lacks a column this query uses (stale INFORMATION_SCHEMA, or columns
+            # only guessed from the repo). Retry the whole query without it once, instead of failing
+            # into slow column-by-column tracing with a warning per column.
+            try:
+                roots = trace_all(None)
+                warnings.append(f"resolved without schema ({_first_line(e)}); the schema may be "
+                                "missing columns (stale INFORMATION_SCHEMA or DDL)")
+            except Exception:  # noqa: BLE001 - fall back to column by column
+                roots = {}
     for col in columns:
         root = roots.get(col.lower()) or _column_root(col, query, schema, dialect, warnings)
         if root is None:
@@ -287,10 +300,49 @@ def _parse_chunk(text: str, tokens: list, dialect, diagnostics: list[str] | None
                 continue
             if not isinstance(inner, exp.Command):
                 return [(inner, tok.line - tokens[0].line)]
-    if diagnostics is not None and any(t.token_type.name in _DML for t in tokens or []):
-        reason = _first_line(error) if error else "statement type not supported"
+    if diagnostics is not None and (error is not None or _writes_data(tokens)):
+        reason = _first_line(error) if error else f"statement type not supported ({_lead(tokens)} ...)"
         diagnostics.append(f"line {line}: {reason}")
     return []
+
+
+_NOT_LINEAGE = {"FUNCTION", "PROCEDURE", "SCHEMA", "INDEX", "ROW", "POLICY", "SNAPSHOT", "MODEL", "SEARCH"}
+
+
+def _writes_data(tokens: list) -> bool:
+    """INSERT / MERGE / UPDATE, or CREATE ... TABLE|VIEW (not functions, procedures, schemas...)."""
+    words = [t.text.upper() for t in (tokens or [])[:8]]
+    if not words:
+        return False
+    if words[0] in ("INSERT", "MERGE", "UPDATE"):
+        return True
+    return words[0] == "CREATE" and not _NOT_LINEAGE & set(words) and bool({"TABLE", "VIEW"} & set(words))
+
+
+def _lead(tokens: list) -> str:
+    """The statement's leading keywords, without table or column names."""
+    out = []
+    for t in (tokens or [])[:6]:
+        if t.token_type.name in ("VAR", "IDENTIFIER", "STRING", "NUMBER"):
+            break
+        out.append(t.text.upper())
+    return " ".join(out) or "?"
+
+
+def _collect_ddl(stmt: exp.Expr, dialect, drop_catalog: bool, ddl: dict) -> None:
+    """CREATE TABLE t (col TYPE, ...) definitions: a schema source that needs no warehouse access."""
+    if not (isinstance(stmt, exp.Create) and isinstance(stmt.this, exp.Schema)):
+        return
+    table = stmt.this.this
+    if not isinstance(table, exp.Table):
+        return
+    cols = {}
+    for d in stmt.this.expressions:
+        if isinstance(d, exp.ColumnDef):
+            kind = d.args.get("kind")
+            cols[d.name.lower()] = {"type": kind.sql(dialect=dialect) if kind else "UNKNOWN"}
+    if cols:
+        ddl.setdefault(table_name(table, drop_catalog), {}).update(cols)
 
 
 def _is_temp(stmt: exp.Expr) -> bool:
@@ -299,7 +351,8 @@ def _is_temp(stmt: exp.Expr) -> bool:
 
 def parse_sql(sql: str, dialect: str | None = None, schema: dict | Schema | None = None,
               drop_catalog: bool = True, temp_scope: str | None = None,
-              diagnostics: list[str] | None = None, columns_only: bool = False) -> list[StatementLineage]:
+              diagnostics: list[str] | None = None, columns_only: bool = False,
+              ddl: dict | None = None) -> list[StatementLineage]:
     """Column lineage for every lineage-producing statement in ``sql``.
 
     ``temp_scope`` (usually the file path) namespaces TEMP tables as ``<scope>::<name>`` so two
@@ -322,6 +375,8 @@ def parse_sql(sql: str, dialect: str | None = None, schema: dict | Schema | None
 
     results = []
     for stmt, line in parsed:
+        if ddl is not None:
+            _collect_ddl(stmt, dialect, drop_catalog, ddl)
         result = _statement_lineage(stmt, dialect, schema, drop_catalog, columns_only)
         if result is None:
             continue

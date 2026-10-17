@@ -183,7 +183,8 @@ def test_stale_schema_does_not_lose_lineage():
     (st,) = parse_sql("CREATE TABLE s.t AS SELECT o.order_id, o.gross_amount - o.discount_amount AS net FROM raw.orders o",
                       "bigquery", schema)
     assert ("s.t", "net", "raw.orders", "discount_amount") in edge_set([st])
-    assert any("INFORMATION_SCHEMA may be stale" in w for w in st.warnings)
+    stale = [w for w in st.warnings if "schema may be missing columns" in w]
+    assert len(stale) == 1                       # one warning per statement, not one per column
 
 
 def test_cli_never_relies_on_the_platform_encoding(tmp_path):
@@ -289,3 +290,40 @@ def test_build_reports_progress_for_both_passes():
     for stage in stages:
         done = [c for c in calls if c[0] == stage]
         assert done[-1][1] == done[-1][2] and [d[1] for d in done] == list(range(1, len(done) + 1))
+
+
+def test_wide_query_with_schema_gap_stays_fast_and_quiet():
+    import time
+    cols = [f"c{i}" for i in range(150)]
+    schema = {"curated": {"claims": {c: "UNKNOWN" for c in cols[:100]}}}     # lacks reference_code
+    sql = (f"CREATE OR REPLACE VIEW mart.v AS WITH base AS (SELECT c.*, c.reference_code AS ref "
+           f"FROM curated.claims c) SELECT {', '.join(f'b.{c}' for c in cols[:100])}, b.ref FROM base b")
+    t = time.monotonic()
+    (st,) = parse_sql(sql, "bigquery", schema)
+    assert time.monotonic() - t < 1.0
+    assert len(st.edges) == 101 and len(st.warnings) == 1
+
+
+def test_only_data_writing_statements_are_reported():
+    diags = []
+    parse_sql("CREATE TEMP FUNCTION f(x INT64) AS (x + 1); CREATE SCHEMA IF NOT EXISTS ds;", "bigquery",
+              diagnostics=diags)
+    assert diags == []
+
+
+def test_ddl_files_are_a_schema_source(tmp_path):
+    (tmp_path / "ddl").mkdir()
+    (tmp_path / "dml").mkdir()
+    (tmp_path / "ddl" / "t.sql").write_text(
+        "CREATE TABLE IF NOT EXISTS `p.raw.orders` (order_id STRING, cid STRING, amount NUMERIC);\n"
+        "CREATE TABLE IF NOT EXISTS `p.raw.customers` (cid STRING, region STRING);", encoding="utf-8")
+    (tmp_path / "dml" / "m.sql").write_text(
+        "INSERT INTO mart.t (order_id, region, amount) SELECT order_id, region, amount "
+        "FROM `p.raw.orders` o JOIN `p.raw.customers` c ON o.cid = c.cid", encoding="utf-8")
+    (tmp_path / "lineage.yaml").write_text("dialect: bigquery\nsql_paths: [ddl, dml]\n", encoding="utf-8")
+    g = build_graph(LineageConfig.load(tmp_path))
+    edges = {(e["target_column"], e["source_table"], e["source_column"], e["ambiguous"]) for e in g.edges}
+    assert edges == {("order_id", "raw.orders", "order_id", False), ("region", "raw.customers", "region", False),
+                     ("amount", "raw.orders", "amount", False)}
+    assert g.column_info("raw.orders", "amount")["type"] == "NUMERIC"
+    assert not any("ambiguous" in w for w in g.data["warnings"])
