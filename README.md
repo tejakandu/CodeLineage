@@ -78,6 +78,8 @@ Every hop in an answer points back to a file, line and Airflow task, so users ca
 
 ## Quick start (sample repo)
 
+Setting it up on your own laptop and SQL repo: see **[docs/QUICKSTART.md](docs/QUICKSTART.md)**.
+
 ```bash
 pip install -e ".[dev]"
 python -m codelineage --repo examples/sample_repo build
