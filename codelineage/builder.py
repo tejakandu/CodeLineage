@@ -54,7 +54,7 @@ def _bigquery_schema(cfg: LineageConfig, warnings: list[str], bq_client=None) ->
     """INFORMATION_SCHEMA from BigQuery, cached in .lineage/ so builds still work offline."""
     cache = cfg.repo_root / ".lineage" / "information_schema.json"
     try:
-        data = load_bigquery_schema(cfg.schema_bigquery, cfg.drop_catalog, bq_client)
+        data = load_bigquery_schema(cfg.schema_bigquery, cfg.drop_catalog, bq_client, cfg.bigquery_project)
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(data), encoding="utf-8")
         return data
@@ -89,6 +89,15 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
             dag_files += 1
             tasks.extend(parse_dag_file(f))
 
+    # SQL files are listed first so DAG references can also be matched by bare file name.
+    sql_files: list[Path] = []
+    for d in cfg.resolve(cfg.sql_paths):
+        sql_files += walk_files(d, ".sql", root, cfg.exclude, io_warnings)
+    by_name: dict[str, list[Path]] = {}
+    for f in dict.fromkeys(sql_files):
+        by_name.setdefault(f.name.lower(), []).append(f)
+    ambiguous_refs: set[str] = set()
+
     def resolve_template(ref: str) -> Path | None:
         for base in searchpath:
             p = (base / ref).resolve()
@@ -101,6 +110,14 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
                 p = (base / Path(*parts[i:])).resolve()
                 if p.is_file():
                     return p
+        # A bare file name (query_sql_path = "all_claims_view.sql"): use the one SQL file with that name.
+        matches = by_name.get(Path(ref).name.lower(), [])
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            ambiguous_refs.add(f"{ref}: {len(matches)} files have this name "
+                               f"({', '.join(m.relative_to(root).as_posix() for m in matches[:3])}); "
+                               "add the folder to template_searchpath")
         return None
 
     tasks_by_file: dict[Path, list[SqlTask]] = {}
@@ -116,6 +133,7 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
         elif t.inline_sql:
             rel = Path(t.dag_file).resolve().relative_to(root)
             units.append((f"{rel.as_posix()}::{t.task_id}", t.inline_sql, [t]))
+    unresolved += sorted(ambiguous_refs)
 
     # 2. SQL files
     seen = set()
@@ -126,14 +144,13 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
             io_warnings.append(f"{f.as_posix()}: could not read ({e.strerror or e})")
             return None
 
-    for d in cfg.resolve(cfg.sql_paths):
-        for f in walk_files(d, ".sql", root, cfg.exclude, io_warnings):
-            if f in seen:
-                continue
-            seen.add(f)
-            text = read(f)
-            if text is not None:
-                units.append((f.relative_to(root).as_posix() if f.is_relative_to(root) else f.as_posix(), text, tasks_by_file.get(f, [])))
+    for f in sql_files:
+        if f in seen:
+            continue
+        seen.add(f)
+        text = read(f)
+        if text is not None:
+            units.append((f.relative_to(root).as_posix() if f.is_relative_to(root) else f.as_posix(), text, tasks_by_file.get(f, [])))
     for f, ts in tasks_by_file.items():  # referenced by DAGs but outside sql_paths
         if f not in seen:
             text = read(f)

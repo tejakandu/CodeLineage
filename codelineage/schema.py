@@ -90,15 +90,17 @@ def load_information_schema(paths: list[Path], drop_catalog: bool = True) -> dic
 _BQ_SCOPE = re.compile(r"^[a-z][a-z0-9.:-]*[a-z0-9]\.(region-[a-z0-9-]+|[A-Za-z_][A-Za-z0-9_]*)$")
 
 
-def load_bigquery_schema(scopes: list[str], drop_catalog: bool = True, client=None) -> dict[str, dict[str, dict]]:
+def load_bigquery_schema(scopes: list[str], drop_catalog: bool = True, client=None,
+                         project: str | None = None) -> dict[str, dict[str, dict]]:
     """Reads column names, types and descriptions straight from BigQuery INFORMATION_SCHEMA.
 
     Each scope is ``project.region-xx`` (every dataset in that region) or ``project.dataset``.
     Uses COLUMN_FIELD_PATHS (top-level fields only) because it carries column descriptions.
-    Needs bigquery.jobUser on the project and metadata read access on the datasets."""
+    The query runs (and is billed) in `project` (default: the gcloud/ADC project), so that project
+    needs bigquery.jobUser; the datasets' project needs metadata read access (metadataViewer)."""
     from google.cloud import bigquery
 
-    client = client or bigquery.Client()
+    client = client or bigquery.Client(project=project)
     out: dict[str, dict[str, dict]] = {}
     for scope in scopes:
         if not _BQ_SCOPE.match(scope):

@@ -383,3 +383,54 @@ with DAG("claims_daily", schedule="0 2 * * *") as dag:
     found = {t.task_id: t.sql_file for t in parse_dag_file(dag)}
     assert found == {"load_a": "mart/a.sql", "load_b": "mart/b.sql", "run_e": "/opt/airflow/sql/mart/e.sql"}
     assert all(t.dag_id == "claims_daily" and t.schedule == "0 2 * * *" for t in parse_dag_file(dag))
+
+
+def test_taskflow_override_with_sql_path_variable_and_bare_file_name(tmp_path):
+    """The real repo's DAG shape: a shared @task function called via .override(task_id=...), with the
+    SQL file in a module-level variable holding only the file name."""
+    (tmp_path / "dags").mkdir()
+    (tmp_path / "bigquery" / "dml").mkdir(parents=True)
+    (tmp_path / "bigquery" / "dml" / "all_claims_view.sql").write_text(
+        "CREATE OR REPLACE TABLE ds.all_claims_view AS SELECT c.claim_id FROM raw.claims c", encoding="utf-8")
+    for name in ("dup_a", "dup_b"):
+        (tmp_path / "bigquery" / name).mkdir()
+        (tmp_path / "bigquery" / name / "dup.sql").write_text("SELECT 1", encoding="utf-8")
+    (tmp_path / "dags" / "tr__audit_data__all_claims_view_refresh.py").write_text('''
+from airflow.decorators import dag
+from common.tasks import execute_sql_fn
+
+query_sql_path = "all_claims_view.sql"
+other_sql: str = "dup.sql"
+
+with DAG(dag_id="tr__audit_data__all_claims_view_refresh", schedule="0 5 * * *") as d:
+    wait = ExternalTaskSensor(task_id="wait_for_reference_data_dag", external_task_id=None)
+    task_1 = execute_sql_fn.override(task_id="refresh_acv")(predefined_args, query_sql_path)
+    task_2 = execute_sql_fn.override(task_id="refresh_dup")(predefined_args, other_sql)
+    wait >> task_1
+''', encoding="utf-8")
+    (tmp_path / "lineage.yaml").write_text("dialect: bigquery\nsql_paths: [bigquery]\ndag_paths: [dags]\n",
+                                          encoding="utf-8")
+    g = build_graph(LineageConfig.load(tmp_path))
+    (bb,) = g.tables["ds.all_claims_view"]["built_by"]
+    assert (bb["dag_id"], bb["task_id"], bb["schedule"]) == ("tr__audit_data__all_claims_view_refresh", "refresh_acv", "0 5 * * *")
+    assert bb["upstream_tasks"] == ["wait_for_reference_data_dag"]
+    assert g.data["dag_scan"] == {"files": 1, "sql_tasks": 2, "linked": 1}
+    assert any("dup.sql: 2 files have this name" in w for w in g.data["warnings"])
+
+
+def test_bigquery_schema_job_project(monkeypatch):
+    from google.cloud import bigquery
+    from codelineage.schema import load_bigquery_schema
+    seen = {}
+
+    class Client:
+        def __init__(self, project=None):
+            seen["project"] = project
+
+        def query(self, sql):
+            seen["sql"] = sql
+            return type("J", (), {"result": lambda s: []})()
+    monkeypatch.setattr(bigquery, "Client", Client)
+    load_bigquery_schema(["dp-qa-derived-e0f9.region-us"], project="ag-np-dev-agent-def1")
+    assert seen["project"] == "ag-np-dev-agent-def1"
+    assert "`dp-qa-derived-e0f9`.`region-us`.INFORMATION_SCHEMA" in seen["sql"]
