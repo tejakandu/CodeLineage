@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+bigquery = ["google-cloud-bigquery>=3.10"]
 
 [project.scripts]
 codelineage = "codelineage.cli:main"

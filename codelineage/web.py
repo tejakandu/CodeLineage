@@ -6,6 +6,7 @@ import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .telemetry import InteractionLogger
 from .tools import LineageService
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>CodeLineage</title>
@@ -23,6 +24,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>CodeLineage</t
  form{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #dde;padding:12px;display:flex;gap:8px;justify-content:center}
  input{flex:1;max-width:860px;padding:10px;font-size:15px;border:1px solid #ccd;border-radius:6px}
  button{padding:10px 18px;border:0;border-radius:6px;background:#1a73e8;color:#fff;font-size:15px}
+ .fb{margin-top:8px}.fb button{background:#eef1f5;color:#1d2330;padding:4px 10px;font-size:13px;margin-right:6px}
 </style></head><body>
 <header>CodeLineage — ask where your data comes from</header>
 <div id="log"><div class="msg">Try: <i>Where does avg_order_value in rpt_region_kpis come from?</i></div></div>
@@ -41,19 +43,38 @@ async function render(div, md){
         code.parentElement.outerHTML='<div>'+svg+'</div>';}catch(e){}
   }
 }
+function addFeedback(div, id){
+  const fb=document.createElement('div'); fb.className='fb';
+  fb.innerHTML='<button data-r="1">👍 Helpful</button><button data-r="-1">👎 Wrong / not helpful</button>';
+  fb.onclick = async e => { const r=e.target.dataset.r; if(!r) return;
+    const comment = r<0 ? (prompt('What was wrong? (optional)')||null) : null;
+    await fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session,interaction_id:id,rating:+r,comment})});
+    fb.textContent='Thanks for the feedback.'; };
+  div.appendChild(fb);
+}
 document.getElementById('f').onsubmit = async e => {
   e.preventDefault(); const q=document.getElementById('q'); const text=q.value.trim(); if(!text) return;
   q.value=''; add('user', esc(text)); const pending = add('', '<i>Tracing lineage…</i>');
   try{ const r = await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,question:text})});
-       const j = await r.json(); await render(pending, j.answer || ('Error: '+j.error)); }
+       const j = await r.json(); await render(pending, j.answer || ('Error: '+j.error));
+       if (j.interaction_id) addFeedback(pending, j.interaction_id); }
   catch(err){ pending.textContent='Error: '+err; }
 };
 </script></body></html>"""
 
 
-def serve(service: LineageService, host: str = "127.0.0.1", port: int = 8765, model: str | None = None) -> None:
+def _user(headers) -> str | None:
+    # Identity-Aware Proxy puts the signed-in user here as "accounts.google.com:alice@corp.com".
+    v = headers.get("X-Goog-Authenticated-User-Email")
+    return v.split(":", 1)[-1] if v else None
+
+
+def serve(service: LineageService, host: str = "127.0.0.1", port: int = 8765, model: str | None = None,
+          logger: InteractionLogger | None = None) -> None:
     from .gemini_chat import LineageChat
 
+    logger = logger or InteractionLogger.from_env()
     sessions: dict[str, LineageChat] = {}
     lock = threading.Lock()
 
@@ -72,15 +93,20 @@ def serve(service: LineageService, host: str = "127.0.0.1", port: int = 8765, mo
                 self._send(404, b"not found", "text/plain")
 
         def do_POST(self):  # noqa: N802
-            if self.path != "/api/chat":
+            if self.path not in ("/api/chat", "/api/feedback"):
                 return self._send(404, b"not found", "text/plain")
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 sid = str(req.get("session") or uuid.uuid4())
                 with lock:
-                    chat = sessions.get(sid) or sessions.setdefault(sid, LineageChat(service, model))
+                    chat = sessions.get(sid) or sessions.setdefault(sid, LineageChat(
+                        service, model, logger=logger, surface="web", user_id=_user(self.headers), session_id=sid))
+                if self.path == "/api/feedback":
+                    chat.feedback(str(req["interaction_id"]), 1 if int(req["rating"]) > 0 else -1, req.get("comment"))
+                    return self._send(200, b"{}", "application/json")
                 answer = chat.ask(str(req["question"]))
-                self._send(200, json.dumps({"answer": answer}).encode(), "application/json")
+                body = {"answer": answer, "interaction_id": chat.last_interaction_id}
+                self._send(200, json.dumps(body).encode(), "application/json")
             except Exception as e:  # noqa: BLE001
                 self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
 

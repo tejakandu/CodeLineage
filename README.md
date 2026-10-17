@@ -90,6 +90,18 @@ python -m codelineage --repo /path/to/sql-repo web --port 8765   # http://127.0.
 A single page with chat history and rendered mermaid diagrams. To share it, run it on an internal VM
 or Cloud Run behind IAP. It binds to localhost by default and has no auth of its own.
 
+## Usage analytics (BigQuery)
+
+Every question, answer, tool call and 👍/👎 can be logged to a BigQuery table:
+
+```bash
+codelineage bq-init my-proj.codelineage.interactions
+export CODELINEAGE_BQ_TABLE=my-proj.codelineage.interactions
+```
+
+See [docs/TELEMETRY.md](docs/TELEMETRY.md) for the schema, what each surface can capture (the
+Gemini Code Assist path logs tool calls only), and ready-made analysis queries.
+
 ## Pointing it at your repo
 
 Add a `lineage.yaml` at the root of your SQL repo (see `examples/sample_repo/lineage.yaml`):
@@ -151,6 +163,7 @@ codelineage/
   tools.py         LLM tools + system prompt
   gemini_chat.py   Gemini (google-genai) chat with automatic function calling
   mcp_server.py    MCP server for Gemini Code Assist / Gemini CLI
-  web.py           browser chat window
+  web.py           browser chat window (with 👍/👎 feedback)
+  telemetry.py     prompt/answer/tool-call logging to BigQuery and/or JSONL
 examples/sample_repo/   SQL + DAGs + config used by the tests
 ```

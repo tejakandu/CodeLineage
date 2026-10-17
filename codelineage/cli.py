@@ -30,7 +30,16 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--port", type=int, default=8765)
     w.add_argument("--host", default="127.0.0.1")
     w.add_argument("--model")
+    b = sub.add_parser("bq-init", help="create the BigQuery table for prompt/answer logging")
+    b.add_argument("table", help="project.dataset.table")
+    b.add_argument("--retention-days", type=int, default=400, help="partition expiry (0 = keep forever)")
     args = ap.parse_args(argv)
+
+    if args.cmd == "bq-init":
+        from .telemetry import create_table
+        t = create_table(args.table, args.retention_days or None)
+        print(f"Ready: {t.full_table_id}. Set CODELINEAGE_BQ_TABLE={args.table} to start logging.")
+        return 0
 
     if args.cmd == "build":
         cfg = LineageConfig.load(args.repo)
@@ -50,7 +59,9 @@ def main(argv: list[str] | None = None) -> int:
         print(svc.find_columns(args.text))
     elif args.cmd == "chat":
         from .gemini_chat import LineageChat
-        chat = LineageChat(svc, args.model)
+        from .telemetry import InteractionLogger, default_user
+        logger = InteractionLogger.from_env()
+        chat = LineageChat(svc, args.model, logger=logger, surface="cli", user_id=default_user())
         if args.question:
             print(chat.ask(" ".join(args.question)))
             return 0
