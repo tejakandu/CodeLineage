@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .builder import build_graph
-from .config import LineageConfig
+from .config import ConfigError, LineageConfig
 from .tools import DEFAULT_GRAPH, LineageService
 
 
@@ -32,6 +32,14 @@ def group_warnings(warnings: list[str]) -> list[tuple[str, list[str]]]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+
+def _main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):  # Windows code pages can't print the lineage tree's └ ◆ ⤷
             stream.reconfigure(errors="replace")

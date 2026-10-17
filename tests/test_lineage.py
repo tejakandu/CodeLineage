@@ -256,3 +256,26 @@ def test_missing_lineage_yaml_is_reported(tmp_path, capsys):
     assert "no lineage.yaml" in err and "lineage.html" in err
     (tmp_path / "lineage.yml").write_text("dialect: bigquery\n", encoding="utf-8")
     assert LineageConfig.load(tmp_path).dialect == "bigquery"   # .yml accepted too
+
+
+def test_lineage_yaml_mistakes_get_plain_messages(tmp_path):
+    import pytest
+    from codelineage.config import ConfigError
+    cfg = tmp_path / "lineage.yaml"
+    cfg.write_text('dialect: bigquery\nexclude:["a/*","b/*"]\ndrop_catalog: true\n', encoding="utf-8")
+    with pytest.raises(ConfigError, match=r'line 2: exclude:\["a/\*".*space after the colon'):
+        LineageConfig.load(tmp_path)
+    cfg.write_text("dialect: bigquery\nsql_path: [sql]\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="unknown setting.*sql_path.*Valid settings"):
+        LineageConfig.load(tmp_path)
+    cfg.write_text("dialect: bigquery\nsql_paths: sql\nexclude:\n", encoding="utf-8")
+    loaded = LineageConfig.load(tmp_path)
+    assert loaded.sql_paths == ["sql"] and loaded.exclude == []
+
+
+def test_cli_prints_config_errors_without_traceback(tmp_path, capsys):
+    from codelineage.cli import main
+    (tmp_path / "lineage.yaml").write_text("exclude:[x]\n", encoding="utf-8")
+    assert main(["--repo", str(tmp_path), "build"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("Error: lineage.yaml is not valid YAML at line 1") and "Traceback" not in err
