@@ -1,0 +1,24 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CodeLineage: rebuild lineage graph",
+      "type": "shell",
+      "command": "python -m codelineage --repo ${workspaceFolder}/examples/sample_repo build",
+      "problemMatcher": []
+    },
+    {
+      "label": "CodeLineage: export lineage.html",
+      "type": "shell",
+      "command": "python -m codelineage --repo ${workspaceFolder}/examples/sample_repo explore --out ${workspaceFolder}/lineage.html",
+      "problemMatcher": []
+    },
+    {
+      "label": "CodeLineage: Lineage Terminal (then run 'Simple Browser: Show' → http://127.0.0.1:8765)",
+      "type": "shell",
+      "command": "python -m codelineage --repo ${workspaceFolder}/examples/sample_repo web",
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}

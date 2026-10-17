@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codelineage"
+version = "0.1.0"
+description = "Column-level data lineage from SQL/Airflow repos, answered by Gemini"
+requires-python = ">=3.10"
+dependencies = [
+    "sqlglot>=25",
+    "jinja2>=3.1",
+    "pyyaml>=6",
+    "google-genai>=1.0",
+    "mcp>=1.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+bigquery = ["google-cloud-bigquery>=3.10"]
+
+[project.scripts]
+codelineage = "codelineage.cli:main"
+codelineage-mcp = "codelineage.mcp_server:main"
+
+[tool.setuptools]
+packages = ["codelineage"]
+
+[tool.setuptools.package-data]
+codelineage = ["static/*.html"]

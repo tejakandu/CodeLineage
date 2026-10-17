@@ -1,0 +1,10 @@
+# Config for the lineage builder (point this at your real SQL repo)
+dialect: bigquery
+sql_paths: [sql]
+dag_paths: [dags]
+config_paths: [config]          # YAML/JSON values are exposed to Jinja as params.* / var.value.* / top-level
+template_searchpath: [sql]      # where "{% include %}" and sql="x.sql" references are resolved
+schema_files: [metadata/information_schema_columns.csv]   # export of INFORMATION_SCHEMA.COLUMNS
+drop_catalog: true              # treat acme-prod.staging.t and staging.t as the same table
+variables:                      # extra/override Jinja variables
+  ds: "2024-01-01"

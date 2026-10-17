@@ -1,0 +1,342 @@
+"""Extracts column-level lineage from SQL statements using sqlglot.
+
+Handles CREATE TABLE/VIEW ... AS SELECT, INSERT [INTO] ... SELECT and MERGE. CTEs and
+subqueries are resolved down to physical tables; the CTE names passed through are kept as
+``via`` so the explanation can mention them.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+import sqlglot
+from sqlglot import exp
+from sqlglot.lineage import Node, lineage
+from sqlglot.optimizer.qualify import qualify
+
+log = logging.getLogger(__name__)
+# sqlglot logs every statement it falls back on (procedures, IF/BEGIN blocks); we recover those ourselves.
+logging.getLogger("sqlglot").setLevel(logging.ERROR)
+
+
+@dataclass
+class ColumnEdge:
+    target_table: str
+    target_column: str
+    source_table: str | None      # None for constants / COUNT(*)
+    source_column: str | None
+    transformation: str           # the SQL expression producing target_column
+    via: list[str] = field(default_factory=list)     # CTEs / subqueries passed through
+    steps: list[str] = field(default_factory=list)   # expression at each hop inside the statement
+    ambiguous: bool = False       # unqualified column in a join; source table is a best guess
+
+
+@dataclass
+class StatementLineage:
+    target_table: str
+    statement_type: str
+    source_tables: list[str]
+    columns: list[str]
+    edges: list[ColumnEdge]
+    filters: list[str] = field(default_factory=list)   # WHERE / JOIN ON / QUALIFY conditions
+    line: int | None = None
+    warnings: list[str] = field(default_factory=list)
+    is_temp: bool = False
+
+
+def table_name(table: exp.Table, drop_catalog: bool = True) -> str:
+    parts = [table.catalog, table.db, table.name]
+    if drop_catalog:
+        parts = parts[1:]
+    return ".".join(p for p in parts if p).lower()
+
+
+def _physical_tables(query: exp.Expr, drop_catalog: bool) -> list[str]:
+    ctes = {c.alias_or_name.lower() for c in query.find_all(exp.CTE)}
+    out = []
+    for t in query.find_all(exp.Table):
+        if not t.db and t.name.lower() in ctes:
+            continue
+        name = table_name(t, drop_catalog)
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _filters(query: exp.Expr) -> list[str]:
+    out = []
+    for node in query.find_all(exp.Where, exp.Join, exp.Qualify, exp.Having):
+        cond = node.args.get("on") if isinstance(node, exp.Join) else node.this
+        if cond is not None:
+            label = {"Where": "WHERE", "Join": "JOIN ON", "Qualify": "QUALIFY", "Having": "HAVING"}[type(node).__name__]
+            out.append(f"{label} {cond.sql()}")
+    return out
+
+
+def _alias_outputs(query: exp.Query, names: list[str]) -> exp.Query:
+    """Aliases SELECT outputs positionally to the INSERT column list."""
+    query = query.copy()
+    selects = [query] if isinstance(query, exp.Select) else list(query.find_all(exp.Select))
+    for sel in selects:
+        if sel.find_ancestor(exp.CTE, exp.Subquery):
+            continue
+        new = []
+        for i, e in enumerate(sel.expressions):
+            if i < len(names) and not isinstance(e, exp.Star):
+                inner = e.this if isinstance(e, exp.Alias) else e
+                new.append(exp.alias_(inner, names[i], quoted=False))
+            else:
+                new.append(e)
+        sel.set("expressions", new)
+    return query
+
+
+def _expr_sql(node: Node, dialect) -> str:
+    e = node.expression
+    return (e.this if isinstance(e, exp.Alias) else e).sql(dialect=dialect)
+
+
+def _leaves(node: Node, via: list[str], steps: list[str], dialect):
+    """Yields (leaf_node, via_ctes, steps) for every physical-table column under node."""
+    if isinstance(node.source, exp.Table) and not node.downstream:
+        yield node, via, steps
+        return
+    for child in node.downstream:
+        hop, hop_steps = via, steps
+        if child.downstream and "." in child.name:
+            hop = via + [child.name.split(".")[0]]
+            hop_steps = steps + [f"{hop[-1]}: {_expr_sql(child, dialect)}"]
+        yield from _leaves(child, hop, hop_steps, dialect)
+
+
+def _query_lineage(target: str, query: exp.Query, columns: list[str], schema: dict,
+                   dialect: str | None, drop_catalog: bool, warnings: list[str]) -> list[ColumnEdge]:
+    edges = []
+    for col in columns:
+        try:
+            root = lineage(col, query, schema=schema, dialect=dialect)
+        except Exception as e:  # noqa: BLE001 - sqlglot raises many types
+            warnings.append(f"column {col}: {e}")
+            continue
+        transformation = _expr_sql(root, dialect)
+        found = False
+        for leaf, via, steps in _leaves(root, [], [], dialect):
+            found = True
+            edges.append(ColumnEdge(
+                target, col.lower(), table_name(leaf.source, drop_catalog),
+                leaf.name.split(".")[-1].lower(), transformation, via, steps))
+        if not found:
+            refs = list(root.expression.find_all(exp.Column))
+            candidates = _physical_tables(query, drop_catalog)
+            if refs and candidates:
+                # Columns sqlglot could not pin to a table (unqualified, join, no schema): keep the
+                # chain going to every candidate table, flagged so the answer can say so.
+                warnings.append(f"column {col}: unqualified reference, source table ambiguous among "
+                                f"{', '.join(candidates)} (load INFORMATION_SCHEMA to resolve)")
+                for r in refs:
+                    for cand in candidates:
+                        edges.append(ColumnEdge(target, col.lower(), cand, r.name.lower(), transformation,
+                                                ambiguous=True))
+            else:
+                edges.append(ColumnEdge(target, col.lower(), None, None, transformation))
+    return edges
+
+
+def _output_columns(query: exp.Query, schema: dict, dialect) -> list[str]:
+    if query.is_star and schema:
+        try:  # expands SELECT * using the known schema
+            query = qualify(query.copy(), schema=schema, dialect=dialect, validate_qualify_columns=False)
+        except Exception:  # noqa: BLE001
+            pass
+    return [c for c in query.named_selects if c and c != "*"]
+
+
+def _assignment_edges(target: str, pairs: list[tuple[str, exp.Expr]], alias_map: dict[str, str],
+                      dialect) -> tuple[list[ColumnEdge], list[str]]:
+    """Edges for `col = expr` style assignments (MERGE, UPDATE)."""
+    others = sorted({t for a, t in alias_map.items() if t != target})
+    edges, columns = [], []
+    for col_name, value in pairs:
+        col_name = col_name.lower()
+        columns.append(col_name)
+        sql = value.sql(dialect=dialect)
+        refs = [value] if isinstance(value, exp.Column) else list(value.find_all(exp.Column))
+        if not refs:
+            edges.append(ColumnEdge(target, col_name, None, None, sql))
+        for c in refs:
+            if c.table:
+                edges.append(ColumnEdge(target, col_name, alias_map.get(c.table.lower(), c.table.lower()),
+                                        c.name.lower(), sql))
+            elif len(others) == 1:
+                edges.append(ColumnEdge(target, col_name, others[0], c.name.lower(), sql))
+            else:
+                for t in others or [target]:
+                    edges.append(ColumnEdge(target, col_name, t, c.name.lower(), sql, ambiguous=len(others) > 1))
+    return edges, list(dict.fromkeys(columns))
+
+
+def _alias_map(target_expr: exp.Table, target: str, sources: list[exp.Expr], drop_catalog: bool) -> dict[str, str]:
+    alias_map = {target_expr.alias_or_name.lower(): target, target_expr.name.lower(): target}
+    for src in sources:
+        if src is None:
+            continue
+        if isinstance(src, exp.Subquery) and src.alias:
+            tables = _physical_tables(src.this, drop_catalog)
+            alias_map[src.alias.lower()] = tables[0] if len(tables) == 1 else ",".join(tables)
+        for t in src.find_all(exp.Table):
+            alias_map.setdefault(t.alias_or_name.lower(), table_name(t, drop_catalog))
+    return alias_map
+
+
+def _merge_lineage(stmt: exp.Merge, target: str, dialect, drop_catalog):
+    alias_map = _alias_map(stmt.this, target, [stmt.args.get("using")], drop_catalog)
+    pairs = []
+    for when in stmt.find_all(exp.When):
+        then = when.args.get("then")
+        if isinstance(then, exp.Update):
+            pairs += [(eq.this.name, eq.expression) for eq in then.expressions]
+        elif isinstance(then, exp.Insert):
+            cols = then.this.expressions if isinstance(then.this, exp.Tuple) else []
+            vals = then.expression.expressions if isinstance(then.expression, exp.Tuple) else []
+            pairs += [(c.name, v) for c, v in zip(cols, vals)]
+    return _assignment_edges(target, pairs, alias_map, dialect)
+
+
+# ---------------------------------------------------------------- statement splitting / recovery
+
+_DML = {"INSERT", "MERGE", "UPDATE", "CREATE"}
+
+
+def _chunks(sql: str, dialect) -> list[tuple[str, int, list]]:
+    """Splits a script into statements at top-level semicolons, keeping each one's start line, so a
+    single unparseable statement doesn't lose the rest of the file."""
+    try:
+        tokens = sqlglot.Dialect.get_or_raise(dialect).tokenize(sql)
+    except Exception:  # noqa: BLE001 - fall back to a naive split
+        out, line = [], 1
+        for part in sql.split(";"):
+            out.append((part, line, []))
+            line += part.count("\n")
+        return out
+    out, cur = [], []
+    for tok in tokens + [None]:
+        if tok is None or tok.token_type.name == "SEMICOLON":
+            if cur:
+                out.append((sql[cur[0].start:cur[-1].end + 1], cur[0].line, cur))
+            cur = []
+        else:
+            cur.append(tok)
+    return out
+
+
+def _parse_chunk(text: str, tokens: list, dialect) -> list[tuple[exp.Expr, int]]:
+    """Parses one statement. If it isn't a plain statement (procedure header, IF ... THEN, BEGIN,
+    LOOP, ...), parses from the first DML keyword inside it instead. Returns (expr, line offset)."""
+    try:
+        stmt = sqlglot.parse_one(text, read=dialect)
+    except Exception:  # noqa: BLE001
+        stmt = None
+    if stmt is not None and not isinstance(stmt, exp.Command) and not (
+            isinstance(stmt, exp.Create) and str(stmt.args.get("kind", "")).upper() in ("PROCEDURE", "FUNCTION")):
+        return [(stmt, 0)]
+    base = tokens[0].start if tokens else 0
+    for i, tok in enumerate(tokens[1:] if tokens else [], start=1):
+        if tok.token_type.name in _DML:
+            if tok.token_type.name == "CREATE":
+                nxt = " ".join(t.text.upper() for t in tokens[i + 1:i + 4])
+                if "PROCEDURE" in nxt or "FUNCTION" in nxt:
+                    continue
+            try:
+                inner = sqlglot.parse_one(text[tok.start - base:], read=dialect)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(inner, exp.Command):
+                return [(inner, tok.line - tokens[0].line)]
+    return []
+
+
+def _is_temp(stmt: exp.Expr) -> bool:
+    return isinstance(stmt, exp.Create) and stmt.find(exp.TemporaryProperty) is not None
+
+
+def parse_sql(sql: str, dialect: str | None = None, schema: dict | None = None,
+              drop_catalog: bool = True, temp_scope: str | None = None) -> list[StatementLineage]:
+    """Column lineage for every lineage-producing statement in ``sql``.
+
+    ``temp_scope`` (usually the file path) namespaces TEMP tables as ``<scope>::<name>`` so two
+    files using the same temp table name don't get linked to each other."""
+    schema = schema or {}
+    parsed = []
+    for text, line, tokens in _chunks(sql, dialect):
+        if not text.strip():
+            continue
+        for stmt, offset in _parse_chunk(text, tokens, dialect):
+            # The graph and schema are lowercase; normalise identifiers so ORDERS, Orders and orders
+            # match (string literals are untouched).
+            for ident in stmt.find_all(exp.Identifier):
+                ident.set("this", ident.this.lower())
+            parsed.append((stmt, line + offset))
+
+    temps = {table_name(s.this.this if isinstance(s.this, exp.Schema) else s.this, drop_catalog)
+             for s, _ in parsed if _is_temp(s)}
+
+    results = []
+    for stmt, line in parsed:
+        result = _statement_lineage(stmt, dialect, schema, drop_catalog)
+        if result is None:
+            continue
+        result.line = line
+        result.is_temp = result.target_table in temps
+        results.append(result)
+
+    if temp_scope and temps:
+        scoped = lambda t: f"{temp_scope}::{t}" if t in temps else t  # noqa: E731
+        for r in results:
+            r.target_table = scoped(r.target_table)
+            r.source_tables = [scoped(t) for t in r.source_tables]
+            for e in r.edges:
+                e.target_table = scoped(e.target_table)
+                e.source_table = scoped(e.source_table) if e.source_table else None
+    return results
+
+
+def _statement_lineage(stmt: exp.Expr, dialect, schema: dict, drop_catalog: bool) -> StatementLineage | None:
+    warnings: list[str] = []
+    if isinstance(stmt, (exp.Create, exp.Insert)) and isinstance(stmt.expression, exp.Query):
+        target_expr = stmt.this.this if isinstance(stmt.this, exp.Schema) else stmt.this
+        kind = f"CREATE {stmt.args.get('kind', 'TABLE')}" if isinstance(stmt, exp.Create) else "INSERT"
+        query = stmt.expression
+        col_names = [c.name for c in stmt.this.expressions] if isinstance(stmt.this, exp.Schema) else []
+    elif isinstance(stmt, exp.Merge):
+        target = table_name(stmt.this, drop_catalog)
+        edges, cols = _merge_lineage(stmt, target, dialect, drop_catalog)
+        using = stmt.args.get("using")
+        return StatementLineage(
+            target, "MERGE", [t for t in _physical_tables(using, drop_catalog) if t != target], cols, edges,
+            [f"MERGE ON {stmt.args['on'].sql(dialect=dialect)}"] if stmt.args.get("on") else [])
+    elif isinstance(stmt, exp.Update) and isinstance(stmt.this, exp.Table):
+        target = table_name(stmt.this, drop_catalog)
+        sources = [stmt.args.get("from_") or stmt.args.get("from")] + list(stmt.args.get("joins") or [])
+        alias_map = _alias_map(stmt.this, target, sources, drop_catalog)
+        pairs = [(eq.this.name, eq.expression) for eq in stmt.expressions if isinstance(eq, exp.EQ)]
+        edges, cols = _assignment_edges(target, pairs, alias_map, dialect)
+        src_tables = sorted({t for s in sources if s is not None for t in _physical_tables(s, drop_catalog)} - {target})
+        where = stmt.args.get("where")
+        return StatementLineage(target, "UPDATE", src_tables, cols, edges,
+                                [f"WHERE {where.this.sql(dialect=dialect)}"] if where else [])
+    else:
+        return None
+
+    if not isinstance(target_expr, exp.Table):
+        return None
+    target = table_name(target_expr, drop_catalog)
+    if col_names:
+        query = _alias_outputs(query, col_names)
+        columns = col_names
+    else:
+        columns = _output_columns(query, schema, dialect)
+    if not columns:
+        warnings.append("could not determine output columns (SELECT * on a table missing from INFORMATION_SCHEMA?)")
+    edges = _query_lineage(target, query, columns, schema, dialect, drop_catalog, warnings)
+    return StatementLineage(target, kind, _physical_tables(query, drop_catalog), [c.lower() for c in columns],
+                            edges, _filters(query), None, warnings)
