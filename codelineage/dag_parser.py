@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .fsutil import read_text
+
 _SQL_KEYS = {"sql", "query", "bql", "sql_query"}
 _INCLUDE_RE = re.compile(r"""{%-?\s*include\s+['"]([^'"]+)['"]\s*-?%}""")
 _SQL_WORD_RE = re.compile(r"\b(select|insert|merge|create|update)\b", re.I)
@@ -75,8 +77,8 @@ def _classify(value) -> tuple[str | None, str | None]:
 
 def parse_dag_file(path: Path) -> list[SqlTask]:
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-    except (SyntaxError, UnicodeDecodeError):
+        tree = ast.parse(read_text(path))
+    except (SyntaxError, UnicodeDecodeError, OSError):
         return []
 
     dag_id, schedule, dag_params = path.stem, None, {}

@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 from .builder import build_graph
 from .config import LineageConfig
 from .gcs import GcsStore, is_gcs
+from .fsutil import read_text
 from .graph import LineageGraph
 
 DEFAULT_GRAPH = ".lineage/graph.json"
@@ -53,7 +54,7 @@ class LineageService:
         if self.repo_root:
             p = (self.repo_root / rel).resolve()
             if p.is_relative_to(self.repo_root) and p.is_file():
-                return p.read_text(encoding="utf-8", errors="replace")
+                return read_text(p)
         if self.remote:
             try:
                 return self.remote.read_text(f"files/{rel}")

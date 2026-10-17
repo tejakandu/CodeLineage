@@ -204,3 +204,36 @@ def test_graph_paths_use_forward_slashes(graph):
     files = {e["file"] for e in graph.edges} | {b["file"] for t in graph.tables.values() for b in t["built_by"]}
     assert files and not any("\\" in f for f in files)
     assert "dags/reporting_dag.py::customer_snapshot" in files
+
+
+def test_windows_extended_length_paths():
+    from codelineage.fsutil import extended, plain
+    assert extended(r"C:\repo\a.sql", windows=True) == "\\\\?\\C:\\repo\\a.sql"
+    assert extended(r"\\server\share\a.sql", windows=True) == "\\\\?\\UNC\\server\\share\\a.sql"
+    assert extended("/repo/a.sql", windows=False) == "/repo/a.sql"
+    for p in (r"C:\repo\a.sql", r"\\server\share\a.sql"):
+        assert plain(extended(p, windows=True)) == p
+
+
+def test_deep_paths_excluded_folders_and_unreadable_files(tmp_path, monkeypatch):
+    import codelineage.builder as builder
+    repo = tmp_path / "repo"
+    deep = repo / "sql" / "ddl_archive" / ("x" * 60) / ("y" * 60) / ("z" * 60) / ("w" * 60)
+    deep.mkdir(parents=True)
+    (deep / "old.sql").write_text("CREATE TABLE a.old AS SELECT id FROM raw.t", encoding="utf-8")
+    live = repo / "sql" / "live"
+    live.mkdir(parents=True)
+    (live / "ok.sql").write_text("CREATE TABLE a.ok AS SELECT id FROM raw.t", encoding="utf-8")
+    (live / "broken.sql").write_text("CREATE TABLE a.broken AS SELECT id FROM raw.t", encoding="utf-8")
+    (repo / "lineage.yaml").write_text("dialect: bigquery\nsql_paths: [sql]\n", encoding="utf-8")
+
+    cfg = LineageConfig.load(repo)
+    assert "a.old" in build_graph(cfg).tables          # >260-char path still read
+
+    real = builder.read_text
+    monkeypatch.setattr(builder, "read_text", lambda f: (_ for _ in ()).throw(OSError(2, "Filename too long"))
+                        if f.name == "broken.sql" else real(f))
+    cfg.exclude = ["sql/ddl_archive/*"]
+    g = build_graph(cfg)
+    assert set(g.tables) == {"a.ok"}                   # archive skipped, broken file skipped
+    assert any("broken.sql: could not read (Filename too long)" in w for w in g.data["warnings"])

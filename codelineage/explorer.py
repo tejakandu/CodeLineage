@@ -12,6 +12,7 @@ from importlib import resources
 from pathlib import Path
 
 from . import __version__
+from .fsutil import read_text
 from .graph import LineageGraph
 
 MAX_FILE_BYTES = 512_000
@@ -27,7 +28,7 @@ def read_repo_file(repo_root: Path, path: str) -> str | None:
     p = (repo_root / path).resolve()
     if not p.is_relative_to(repo_root.resolve()) or not p.is_file() or p.stat().st_size > MAX_FILE_BYTES:
         return None
-    return p.read_text(encoding="utf-8", errors="replace")
+    return read_text(p)
 
 
 def render_explorer(graph: LineageGraph, repo_root: str | Path | None, *, mode: str = "static",

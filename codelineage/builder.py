@@ -1,7 +1,6 @@
 """Crawls a SQL repo (SQL files, Airflow DAGs, config files) and builds the lineage graph."""
 from __future__ import annotations
 
-import fnmatch
 import json
 import subprocess
 import logging
@@ -14,18 +13,13 @@ import yaml
 
 from .config import LineageConfig
 from .dag_parser import SqlTask, parse_dag_file
+from .fsutil import read_text, walk_files
 from .graph import LineageGraph
 from .schema import load_bigquery_schema, load_information_schema, to_sqlglot_schema
 from .sql_parser import StatementLineage, parse_sql
 from .templating import SqlRenderer, load_config_values
 
 log = logging.getLogger(__name__)
-
-
-def _excluded(path: Path, root: Path, patterns: list[str]) -> bool:
-    # forward slashes on every OS, so graph paths and exclude patterns match on Windows too
-    rel = path.relative_to(root).as_posix() if path.is_relative_to(root) else path.as_posix()
-    return any(fnmatch.fnmatch(rel, p) for p in patterns)
 
 
 def _statement_line(raw: str, target: str) -> int | None:
@@ -76,10 +70,10 @@ def build_graph(cfg: LineageConfig, bq_client=None) -> LineageGraph:
 
     # 1. DAGs -> which task runs which SQL
     tasks: list[SqlTask] = []
+    io_warnings: list[str] = []
     for d in cfg.resolve(cfg.dag_paths):
-        for f in sorted(d.rglob("*.py")) if d.is_dir() else [d]:
-            if not _excluded(f, root, cfg.exclude):
-                tasks.extend(parse_dag_file(f))
+        for f in walk_files(d, ".py", root, cfg.exclude, io_warnings):
+            tasks.extend(parse_dag_file(f))
 
     def resolve_template(ref: str) -> Path | None:
         for base in searchpath:
@@ -111,15 +105,26 @@ def build_graph(cfg: LineageConfig, bq_client=None) -> LineageGraph:
 
     # 2. SQL files
     seen = set()
+    def read(f: Path) -> str | None:
+        try:
+            return read_text(f)
+        except OSError as e:
+            io_warnings.append(f"{f.as_posix()}: could not read ({e.strerror or e})")
+            return None
+
     for d in cfg.resolve(cfg.sql_paths):
-        for f in sorted(d.rglob("*.sql")) if d.is_dir() else [d]:
-            if f in seen or _excluded(f, root, cfg.exclude):
+        for f in walk_files(d, ".sql", root, cfg.exclude, io_warnings):
+            if f in seen:
                 continue
             seen.add(f)
-            units.append((f.relative_to(root).as_posix(), f.read_text(encoding="utf-8", errors="replace"), tasks_by_file.get(f, [])))
+            text = read(f)
+            if text is not None:
+                units.append((f.relative_to(root).as_posix() if f.is_relative_to(root) else f.as_posix(), text, tasks_by_file.get(f, [])))
     for f, ts in tasks_by_file.items():  # referenced by DAGs but outside sql_paths
         if f not in seen:
-            units.append((f.relative_to(root).as_posix() if f.is_relative_to(root) else f.as_posix(), f.read_text(encoding="utf-8", errors="replace"), ts))
+            text = read(f)
+            if text is not None:
+                units.append((f.relative_to(root).as_posix() if f.is_relative_to(root) else f.as_posix(), text, ts))
 
     rendered = [(name, raw, renderer.render(raw, ts[0].params if ts else None), ts) for name, raw, ts in units]
 
@@ -136,7 +141,7 @@ def build_graph(cfg: LineageConfig, bq_client=None) -> LineageGraph:
 
     tables: dict[str, dict] = {}
     edges: list[dict] = []
-    warnings: list[str] = list(unresolved) + early_warnings
+    warnings: list[str] = list(unresolved) + early_warnings + io_warnings
     for name, raw, sql, ts in rendered:
         statements = parse_sql(sql, cfg.dialect, schema, cfg.drop_catalog, name)
         if not statements and re.search(r"\b(insert|create|merge|update)\b", sql, re.I):

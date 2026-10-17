@@ -197,3 +197,4 @@ merged.
 | SSL errors behind a proxy | `pip config set global.cert <company-ca.pem>`; for Google calls set `REQUESTS_CA_BUNDLE` to the same file |
 | Code Assist doesn't list the tools | full path to `python.exe` in settings.json; agent mode on; reload VS Code |
 | Old graph after SQL changes | `build` again (or `publish --build` for the shared copy) |
+| `git clone`: `Filename too long` / `checkout failed` | Windows path limit. In the clone: `git config core.longpaths true` then `git restore --source=HEAD :/`. CodeLineage reads long paths itself; add folders you don't need (e.g. `bigquery/ddl_archive/*`) to `exclude` |
