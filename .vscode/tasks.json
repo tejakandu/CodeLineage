@@ -1,0 +1,18 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CodeLineage: rebuild lineage graph",
+      "type": "shell",
+      "command": "python -m codelineage --repo ${workspaceFolder}/examples/sample_repo build",
+      "problemMatcher": []
+    },
+    {
+      "label": "CodeLineage: web chat",
+      "type": "shell",
+      "command": "python -m codelineage --repo ${workspaceFolder}/examples/sample_repo web",
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+# Environment config consumed by the DAGs (and by the lineage builder for Jinja rendering)
+project: acme-prod
+raw_dataset: raw
+staging_dataset: staging
+mart_dataset: mart
+fx_table: ref.fx_rates_daily

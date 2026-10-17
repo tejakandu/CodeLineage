@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "codelineage": {
+      "command": "python",
+      "args": ["-m", "codelineage.mcp_server"],
+      "env": { "CODELINEAGE_REPO": "." },
+      "timeout": 60000
+    }
+  }
+}
