@@ -237,3 +237,22 @@ def test_deep_paths_excluded_folders_and_unreadable_files(tmp_path, monkeypatch)
     g = build_graph(cfg)
     assert set(g.tables) == {"a.ok"}                   # archive skipped, broken file skipped
     assert any("broken.sql: could not read (Filename too long)" in w for w in g.data["warnings"])
+
+
+def test_parse_failures_report_their_reason():
+    diags = []
+    assert parse_sql("CREATE TABLE a.b AS SELECT FROM WHERE ,,", "bigquery", diagnostics=diags) == []
+    assert diags and diags[0].startswith("line 1:")
+    diags = []
+    parse_sql("SELECT COUNT(*) FROM `p.d.t`", "bigquery", diagnostics=diags)
+    assert diags == []                                   # read-only queries are not failures
+
+
+def test_missing_lineage_yaml_is_reported(tmp_path, capsys):
+    from codelineage.cli import main
+    (tmp_path / "lineage.html").write_text("dialect: bigquery\n", encoding="utf-8")
+    main(["--repo", str(tmp_path), "build"])
+    err = capsys.readouterr().err
+    assert "no lineage.yaml" in err and "lineage.html" in err
+    (tmp_path / "lineage.yml").write_text("dialect: bigquery\n", encoding="utf-8")
+    assert LineageConfig.load(tmp_path).dialect == "bigquery"   # .yml accepted too

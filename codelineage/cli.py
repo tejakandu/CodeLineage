@@ -4,10 +4,31 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from .builder import build_graph
 from .config import LineageConfig
 from .tools import DEFAULT_GRAPH, LineageService
+
+
+_WARNING_KINDS = [
+    ("no lineage extracted", "files with no parseable lineage (wrong dialect? unsupported SQL?)"),
+    ("statement(s) skipped", "files where some statements could not be parsed"),
+    ("SQL file not found", "DAG SQL references not found (check template_searchpath)"),
+    ("ambiguous", "ambiguous unqualified columns (add schema_bigquery / schema_files)"),
+    ("could not determine output columns", "SELECT * on tables missing from the schema"),
+    ("INFORMATION_SCHEMA", "schema mismatches (stale SQL or schema)"),
+    ("could not read", "unreadable files"),
+    ("skipped folder", "unreadable folders"),
+]
+
+
+def group_warnings(warnings: list[str]) -> list[tuple[str, list[str]]]:
+    groups: dict[str, list[str]] = {}
+    for w in warnings:
+        kind = next((label for key, label in _WARNING_KINDS if key in w), "other")
+        groups.setdefault(kind, []).append(w)
+    return sorted(groups.items(), key=lambda kv: -len(kv[1]))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -54,13 +75,28 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "build":
         cfg = LineageConfig.load(args.repo)
+        if cfg.config_file is None:
+            others = sorted(p.name for p in cfg.repo_root.glob("lineage*") if p.is_file())
+            print(f"NOTE: no lineage.yaml in {cfg.repo_root}; using defaults (whole repo, no SQL dialect)."
+                  + (f" Found {', '.join(others)}: rename it to lineage.yaml?" if others else
+                     " Copy examples/sample_repo/lineage.yaml there and edit it."), file=sys.stderr)
+        elif not cfg.dialect:
+            print(f"NOTE: no 'dialect' in {cfg.config_file.name}; set it (e.g. dialect: bigquery) or "
+                  "dialect-specific SQL won't parse.", file=sys.stderr)
         graph = build_graph(cfg)
-        path = args.graph or cfg.repo_root / DEFAULT_GRAPH
+        path = Path(args.graph or cfg.repo_root / DEFAULT_GRAPH)
         graph.save(path)
+        warnings = graph.data["warnings"]
         print(f"Wrote {path}: {len(graph.tables)} built tables, {len(graph.all_tables())} total, "
-              f"{len(graph.edges)} column edges, {len(graph.data['warnings'])} warnings")
-        for w_ in graph.data["warnings"][:50]:
-            print("  warning:", w_)
+              f"{len(graph.edges)} column edges, {len(warnings)} warnings")
+        if warnings:
+            report = path.with_name("warnings.txt")
+            report.write_text("\n".join(warnings) + "\n", encoding="utf-8")
+            for kind, items in group_warnings(warnings):
+                print(f"\n  {len(items):>5}  {kind}")
+                for w_ in items[:3]:
+                    print(f"         {w_}")
+            print(f"\nAll warnings: {report}")
         return 0
 
     if args.cmd == "publish":
@@ -98,8 +134,6 @@ def main(argv: list[str] | None = None) -> int:
             if q:
                 print(chat.ask(q))
     elif args.cmd == "explore":
-        from pathlib import Path
-
         from .explorer import render_explorer
         from .telemetry import trending
         trend = trending(svc.graph) if os.environ.get("CODELINEAGE_LOG_FILE") else None

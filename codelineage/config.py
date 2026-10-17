@@ -20,19 +20,19 @@ class LineageConfig:
     exclude: list[str] = field(default_factory=list)
     drop_catalog: bool = True
     variables: dict = field(default_factory=dict)
+    config_file: Path | None = None   # the lineage.yaml that was loaded (None: defaults)
 
     @classmethod
     def load(cls, repo_root: str | Path, config_file: str | Path | None = None) -> "LineageConfig":
         root = Path(repo_root).resolve()
-        path = Path(config_file) if config_file else root / "lineage.yaml"
-        data = {}
-        if path.exists():
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        known = {f for f in cls.__dataclass_fields__ if f != "repo_root"}
+        candidates = [Path(config_file)] if config_file else [root / "lineage.yaml", root / "lineage.yml"]
+        path = next((p for p in candidates if p.exists()), None)
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {} if path else {}
+        known = {f for f in cls.__dataclass_fields__ if f not in ("repo_root", "config_file")}
         unknown = set(data) - known
         if unknown:
             raise ValueError(f"Unknown keys in {path}: {sorted(unknown)}")
-        return cls(repo_root=root, **data)
+        return cls(repo_root=root, config_file=path, **data)
 
     def resolve(self, paths: list[str]) -> list[Path]:
         return [(self.repo_root / p).resolve() for p in paths]

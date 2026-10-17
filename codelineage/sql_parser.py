@@ -238,13 +238,20 @@ def _chunks(sql: str, dialect) -> list[tuple[str, int, list]]:
     return out
 
 
-def _parse_chunk(text: str, tokens: list, dialect) -> list[tuple[exp.Expr, int]]:
+def _first_line(e: Exception) -> str:
+    return (str(e).strip().splitlines() or [type(e).__name__])[0][:160]
+
+
+def _parse_chunk(text: str, tokens: list, dialect, diagnostics: list[str] | None = None,
+                 line: int = 1) -> list[tuple[exp.Expr, int]]:
     """Parses one statement. If it isn't a plain statement (procedure header, IF ... THEN, BEGIN,
-    LOOP, ...), parses from the first DML keyword inside it instead. Returns (expr, line offset)."""
+    LOOP, ...), parses from the first DML keyword inside it instead. Returns (expr, line offset).
+    When a statement that writes data can't be parsed, the reason goes to diagnostics."""
+    error = None
     try:
         stmt = sqlglot.parse_one(text, read=dialect)
-    except Exception:  # noqa: BLE001
-        stmt = None
+    except Exception as e:  # noqa: BLE001
+        stmt, error = None, e
     if stmt is not None and not isinstance(stmt, exp.Command) and not (
             isinstance(stmt, exp.Create) and str(stmt.args.get("kind", "")).upper() in ("PROCEDURE", "FUNCTION")):
         return [(stmt, 0)]
@@ -257,10 +264,14 @@ def _parse_chunk(text: str, tokens: list, dialect) -> list[tuple[exp.Expr, int]]
                     continue
             try:
                 inner = sqlglot.parse_one(text[tok.start - base:], read=dialect)
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                error = error or e
                 continue
             if not isinstance(inner, exp.Command):
                 return [(inner, tok.line - tokens[0].line)]
+    if diagnostics is not None and any(t.token_type.name in _DML for t in tokens or []):
+        reason = _first_line(error) if error else "statement type not supported"
+        diagnostics.append(f"line {line}: {reason}")
     return []
 
 
@@ -269,7 +280,8 @@ def _is_temp(stmt: exp.Expr) -> bool:
 
 
 def parse_sql(sql: str, dialect: str | None = None, schema: dict | None = None,
-              drop_catalog: bool = True, temp_scope: str | None = None) -> list[StatementLineage]:
+              drop_catalog: bool = True, temp_scope: str | None = None,
+              diagnostics: list[str] | None = None) -> list[StatementLineage]:
     """Column lineage for every lineage-producing statement in ``sql``.
 
     ``temp_scope`` (usually the file path) namespaces TEMP tables as ``<scope>::<name>`` so two
@@ -279,7 +291,7 @@ def parse_sql(sql: str, dialect: str | None = None, schema: dict | None = None,
     for text, line, tokens in _chunks(sql, dialect):
         if not text.strip():
             continue
-        for stmt, offset in _parse_chunk(text, tokens, dialect):
+        for stmt, offset in _parse_chunk(text, tokens, dialect, diagnostics, line):
             # The graph and schema are lowercase; normalise identifiers so ORDERS, Orders and orders
             # match (string literals are untouched).
             for ident in stmt.find_all(exp.Identifier):

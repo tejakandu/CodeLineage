@@ -143,9 +143,11 @@ def build_graph(cfg: LineageConfig, bq_client=None) -> LineageGraph:
     edges: list[dict] = []
     warnings: list[str] = list(unresolved) + early_warnings + io_warnings
     for name, raw, sql, ts in rendered:
-        statements = parse_sql(sql, cfg.dialect, schema, cfg.drop_catalog, name)
-        if not statements and re.search(r"\b(insert|create|merge|update)\b", sql, re.I):
-            warnings.append(f"{name}: no lineage extracted (unsupported or unparseable SQL)")
+        diagnostics: list[str] = []
+        statements = parse_sql(sql, cfg.dialect, schema, cfg.drop_catalog, name, diagnostics)
+        if diagnostics:
+            what = "no lineage extracted" if not statements else f"{len(diagnostics)} statement(s) skipped"
+            warnings.append(f"{name}: {what}: {diagnostics[0]}")
         for s in statements:
             line = s.line or _statement_line(raw, s.target_table)
             runs = [{"dag_id": t.dag_id, "task_id": t.task_id, "schedule": t.schedule,
@@ -181,6 +183,7 @@ def build_graph(cfg: LineageConfig, bq_client=None) -> LineageGraph:
         "repo_root": str(root),
         "git_commit": _git_commit(root),
         "dialect": cfg.dialect,
+        "config_file": str(cfg.config_file) if cfg.config_file else None,
         "tables": tables,
         "edges": edges,
         "schema": {t: info_schema[t] for t in sorted(used) if t in info_schema},
