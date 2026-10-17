@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 from .builder import build_graph
@@ -20,7 +21,27 @@ _WARNING_KINDS = [
     ("INFORMATION_SCHEMA", "schema mismatches (stale SQL or schema)"),
     ("could not read", "unreadable files"),
     ("skipped folder", "unreadable folders"),
+    ("slow file", "slow files (consider excluding)"),
 ]
+
+
+def _progress_printer():
+    """Progress on stderr: an updating line in a terminal, a line every 10% when redirected."""
+    tty = sys.stderr.isatty()
+    state = {"last": -1, "started": time.monotonic()}
+
+    def show(stage: str, done: int, total: int, name: str) -> None:
+        pct = done * 100 // max(total, 1)
+        if tty:
+            elapsed = time.monotonic() - state["started"]
+            line = f"  {stage}: {done}/{total} ({pct}%) {elapsed:5.0f}s  {name[-60:]}"
+            print("\r" + line.ljust(110)[:110], end="" if done < total else "\n", file=sys.stderr, flush=True)
+        elif pct // 10 != state["last"] or done == total:
+            state["last"] = pct // 10
+            print(f"  {stage}: {done}/{total} ({pct}%)", file=sys.stderr, flush=True)
+        if done == total:
+            state["last"], state["started"] = -1, time.monotonic()
+    return show
 
 
 def group_warnings(warnings: list[str]) -> list[tuple[str, list[str]]]:
@@ -91,7 +112,7 @@ def _main(argv: list[str] | None = None) -> int:
         elif not cfg.dialect:
             print(f"NOTE: no 'dialect' in {cfg.config_file.name}; set it (e.g. dialect: bigquery) or "
                   "dialect-specific SQL won't parse.", file=sys.stderr)
-        graph = build_graph(cfg)
+        graph = build_graph(cfg, progress=_progress_printer())
         path = Path(args.graph or cfg.repo_root / DEFAULT_GRAPH)
         graph.save(path)
         warnings = graph.data["warnings"]

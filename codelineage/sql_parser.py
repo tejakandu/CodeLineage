@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import sqlglot
 from sqlglot import exp
 from sqlglot.lineage import Node, lineage
+from sqlglot.schema import Schema, ensure_schema
 from sqlglot.optimizer.qualify import qualify
 
 log = logging.getLogger(__name__)
@@ -109,24 +110,41 @@ def _leaves(node: Node, via: list[str], steps: list[str], dialect):
         yield from _leaves(child, hop, hop_steps, dialect)
 
 
-def _query_lineage(target: str, query: exp.Query, columns: list[str], schema: dict,
+def _column_root(col: str, query: exp.Query, schema: Schema | None, dialect, warnings: list[str]):
+    """Lineage of one column, used when the all-columns call fails. Falls back to no schema."""
+    try:
+        return lineage(col, query, schema=schema or {}, dialect=dialect, trim_selects=False)
+    except Exception as e:  # noqa: BLE001 - sqlglot raises many types
+        if schema is None:
+            warnings.append(f"column {col}: {e}")
+            return None
+        # Usually a stale/partial INFORMATION_SCHEMA (a column added since the export): resolve
+        # without the schema rather than lose the column's lineage.
+        try:
+            root = lineage(col, query, schema={}, dialect=dialect, trim_selects=False)
+            warnings.append(f"column {col}: resolved without schema ({e}); INFORMATION_SCHEMA may be stale")
+            return root
+        except Exception as e2:  # noqa: BLE001
+            warnings.append(f"column {col}: {e2}")
+            return None
+
+
+def _query_lineage(target: str, query: exp.Query, columns: list[str], schema: Schema | None,
                    dialect: str | None, drop_catalog: bool, warnings: list[str]) -> list[ColumnEdge]:
     edges = []
+    # One call traces every output column with a shared cache (qualifying the query once); a
+    # per-column call re-analyses the whole query each time, which is slow on wide tables.
+    # trim_selects=False skips building a trimmed copy of every CTE per hop (only used for display
+    # by sqlglot; the edges are identical) and is ~15x faster on CTE-heavy SQL.
+    try:
+        roots = {k.lower(): v for k, v in lineage(None, query, schema=schema or {}, dialect=dialect,
+                                                    trim_selects=False).items()}
+    except Exception:  # noqa: BLE001 - fall back to column by column
+        roots = {}
     for col in columns:
-        try:
-            root = lineage(col, query, schema=schema, dialect=dialect)
-        except Exception as e:  # noqa: BLE001 - sqlglot raises many types
-            if not schema:
-                warnings.append(f"column {col}: {e}")
-                continue
-            # Usually a stale/partial INFORMATION_SCHEMA (a column added since the export): resolve
-            # without the schema rather than lose the column's lineage.
-            try:
-                root = lineage(col, query, schema={}, dialect=dialect)
-                warnings.append(f"column {col}: resolved without schema ({e}); INFORMATION_SCHEMA may be stale")
-            except Exception as e2:  # noqa: BLE001
-                warnings.append(f"column {col}: {e2}")
-                continue
+        root = roots.get(col.lower()) or _column_root(col, query, schema, dialect, warnings)
+        if root is None:
+            continue
         transformation = _expr_sql(root, dialect)
         found = False
         for leaf, via, steps in _leaves(root, [], [], dialect):
@@ -151,7 +169,7 @@ def _query_lineage(target: str, query: exp.Query, columns: list[str], schema: di
     return edges
 
 
-def _output_columns(query: exp.Query, schema: dict, dialect) -> list[str]:
+def _output_columns(query: exp.Query, schema: Schema | None, dialect) -> list[str]:
     if query.is_star and schema:
         try:  # expands SELECT * using the known schema
             query = qualify(query.copy(), schema=schema, dialect=dialect, validate_qualify_columns=False)
@@ -279,14 +297,15 @@ def _is_temp(stmt: exp.Expr) -> bool:
     return isinstance(stmt, exp.Create) and stmt.find(exp.TemporaryProperty) is not None
 
 
-def parse_sql(sql: str, dialect: str | None = None, schema: dict | None = None,
+def parse_sql(sql: str, dialect: str | None = None, schema: dict | Schema | None = None,
               drop_catalog: bool = True, temp_scope: str | None = None,
-              diagnostics: list[str] | None = None) -> list[StatementLineage]:
+              diagnostics: list[str] | None = None, columns_only: bool = False) -> list[StatementLineage]:
     """Column lineage for every lineage-producing statement in ``sql``.
 
     ``temp_scope`` (usually the file path) namespaces TEMP tables as ``<scope>::<name>`` so two
     files using the same temp table name don't get linked to each other."""
-    schema = schema or {}
+    if isinstance(schema, dict):  # build sqlglot's schema object once, not once per column
+        schema = ensure_schema(schema, dialect=dialect) if schema else None
     parsed = []
     for text, line, tokens in _chunks(sql, dialect):
         if not text.strip():
@@ -303,7 +322,7 @@ def parse_sql(sql: str, dialect: str | None = None, schema: dict | None = None,
 
     results = []
     for stmt, line in parsed:
-        result = _statement_lineage(stmt, dialect, schema, drop_catalog)
+        result = _statement_lineage(stmt, dialect, schema, drop_catalog, columns_only)
         if result is None:
             continue
         result.line = line
@@ -321,7 +340,8 @@ def parse_sql(sql: str, dialect: str | None = None, schema: dict | None = None,
     return results
 
 
-def _statement_lineage(stmt: exp.Expr, dialect, schema: dict, drop_catalog: bool) -> StatementLineage | None:
+def _statement_lineage(stmt: exp.Expr, dialect, schema: Schema | None, drop_catalog: bool,
+                       columns_only: bool = False) -> StatementLineage | None:
     warnings: list[str] = []
     if isinstance(stmt, (exp.Create, exp.Insert)) and isinstance(stmt.expression, exp.Query):
         target_expr = stmt.this.this if isinstance(stmt.this, exp.Schema) else stmt.this
@@ -358,6 +378,6 @@ def _statement_lineage(stmt: exp.Expr, dialect, schema: dict, drop_catalog: bool
         columns = _output_columns(query, schema, dialect)
     if not columns:
         warnings.append("could not determine output columns (SELECT * on a table missing from INFORMATION_SCHEMA?)")
-    edges = _query_lineage(target, query, columns, schema, dialect, drop_catalog, warnings)
+    edges = [] if columns_only else _query_lineage(target, query, columns, schema, dialect, drop_catalog, warnings)
     return StatementLineage(target, kind, _physical_tables(query, drop_catalog), [c.lower() for c in columns],
                             edges, _filters(query), None, warnings)

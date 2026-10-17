@@ -279,3 +279,13 @@ def test_cli_prints_config_errors_without_traceback(tmp_path, capsys):
     assert main(["--repo", str(tmp_path), "build"]) == 2
     err = capsys.readouterr().err
     assert err.startswith("Error: lineage.yaml is not valid YAML at line 1") and "Traceback" not in err
+
+
+def test_build_reports_progress_for_both_passes():
+    calls = []
+    build_graph(LineageConfig.load(SAMPLE), progress=lambda stage, done, total, name: calls.append((stage, done, total)))
+    stages = {c[0] for c in calls}
+    assert stages == {"reading columns", "tracing lineage"}
+    for stage in stages:
+        done = [c for c in calls if c[0] == stage]
+        assert done[-1][1] == done[-1][2] and [d[1] for d in done] == list(range(1, len(done) + 1))

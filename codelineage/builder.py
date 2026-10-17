@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 import logging
 import re
 from dataclasses import asdict
@@ -13,6 +14,8 @@ import yaml
 
 from .config import LineageConfig
 from .dag_parser import SqlTask, parse_dag_file
+from sqlglot.schema import ensure_schema
+
 from .fsutil import read_text, walk_files
 from .graph import LineageGraph
 from .schema import load_bigquery_schema, load_information_schema, to_sqlglot_schema
@@ -62,7 +65,15 @@ def _bigquery_schema(cfg: LineageConfig, warnings: list[str], bq_client=None) ->
         return {}
 
 
-def build_graph(cfg: LineageConfig, bq_client=None) -> LineageGraph:
+SLOW_FILE_SECONDS = 30
+
+
+def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGraph:
+    """progress(stage, done, total, name), if given, is called as files are processed."""
+    def report(stage: str, i: int, total: int, name: str) -> None:
+        if progress:
+            progress(stage, i, total, name)
+
     root = cfg.repo_root
     searchpath = cfg.resolve(cfg.template_searchpath) + cfg.resolve(cfg.sql_paths) + [root]
     values = {**load_config_values(cfg.resolve(cfg.config_paths)), **cfg.variables}
@@ -136,15 +147,24 @@ def build_graph(cfg: LineageConfig, bq_client=None) -> LineageGraph:
         for t, cols in _bigquery_schema(cfg, early_warnings, bq_client).items():
             for c, info in cols.items():
                 info_schema.setdefault(t, {}).setdefault(c, info)
-    first = [s for name, _, sql, _ in rendered for s in parse_sql(sql, cfg.dialect, None, cfg.drop_catalog, name)]
+    first = []
+    for i, (name, _, sql, _) in enumerate(rendered, 1):
+        report("reading columns", i, len(rendered), name)
+        first += parse_sql(sql, cfg.dialect, None, cfg.drop_catalog, name, columns_only=True)
     schema = to_sqlglot_schema(info_schema, _inferred_columns(first))
+    schema = ensure_schema(schema, dialect=cfg.dialect) if schema else None   # built once, reused
 
     tables: dict[str, dict] = {}
     edges: list[dict] = []
     warnings: list[str] = list(unresolved) + early_warnings + io_warnings
-    for name, raw, sql, ts in rendered:
+    for i, (name, raw, sql, ts) in enumerate(rendered, 1):
+        report("tracing lineage", i, len(rendered), name)
+        started = time.monotonic()
         diagnostics: list[str] = []
         statements = parse_sql(sql, cfg.dialect, schema, cfg.drop_catalog, name, diagnostics)
+        elapsed = time.monotonic() - started
+        if elapsed > SLOW_FILE_SECONDS:
+            warnings.append(f"{name}: slow file ({elapsed:.0f}s to trace); add it to exclude if it isn't needed")
         if diagnostics:
             what = "no lineage extracted" if not statements else f"{len(diagnostics)} statement(s) skipped"
             warnings.append(f"{name}: {what}: {diagnostics[0]}")
