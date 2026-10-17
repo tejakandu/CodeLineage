@@ -12,6 +12,10 @@ class ConfigError(ValueError):
     """A problem in lineage.yaml, worded for the person editing it."""
 
 
+_NO_SPACE = re.compile(r"^\s*[A-Za-z_]+:[^\s/]")   # `exclude:[...]` (but not `gs://...` values)
+_SPACE_HINT = " Add a space after the colon (e.g. `exclude: [...]`)."
+
+
 def _read_yaml(path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
     try:
@@ -24,13 +28,17 @@ def _read_yaml(path: Path) -> dict:
         lines = text.splitlines()
         bad = lines[line_no - 1] if line_no and line_no <= len(lines) else ""
         hint = ""
-        if re.match(r"^\s*[A-Za-z_]+:\S", bad):
-            hint = " Add a space after the colon (e.g. `exclude: [...]`)."
+        if _NO_SPACE.match(bad):
+            hint = _SPACE_HINT
         elif "\t" in bad:
             hint = " Use spaces, not tabs."
         where = f" line {line_no}: {bad.strip()}" if line_no else ""
         raise ConfigError(f"{path.name} is not valid YAML at{where}.{hint}") from None
     if not isinstance(data, dict):
+        # e.g. a lone `exclude:[x]` is valid YAML, but a plain string rather than a setting
+        for i, line in enumerate(text.splitlines(), 1):
+            if _NO_SPACE.match(line):
+                raise ConfigError(f"{path.name} is not valid YAML at line {i}: {line.strip()}.{_SPACE_HINT}")
         raise ConfigError(f"{path.name} must be a list of `setting: value` lines")
     return data
 
