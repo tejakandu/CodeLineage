@@ -6,6 +6,7 @@ identifiers stay readable instead of breaking the parse.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import jinja2
@@ -59,8 +60,21 @@ class SqlRenderer:
         }
 
     def render(self, sql: str, extra_params: dict | None = None) -> str:
+        ctx = self.context(extra_params)
         try:
-            return self.env.from_string(sql).render(**self.context(extra_params))
+            sql = self.env.from_string(sql).render(**ctx)
         except jinja2.TemplateError:
-            # Fall back to the raw text; the parser may still cope with it.
-            return sql
+            pass  # keep the raw text; the parser may still cope with it
+        return _DOLLAR_VAR.sub(lambda m: _lookup(ctx, m.group(1)), sql)
+
+
+_DOLLAR_VAR = re.compile(r"\$\{\s*([A-Za-z_][\w.]*)\s*\}")   # ${project}, ${env.dataset} (shell/Terraform style)
+
+
+def _lookup(ctx: dict, dotted: str) -> str:
+    node = ctx.get("params", ctx)
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return dotted.split(".")[-1]
+        node = node[part]
+    return str(node)

@@ -327,3 +327,30 @@ def test_ddl_files_are_a_schema_source(tmp_path):
                      ("amount", "raw.orders", "amount", False)}
     assert g.column_info("raw.orders", "amount")["type"] == "NUMERIC"
     assert not any("ambiguous" in w for w in g.data["warnings"])
+
+
+def test_view_column_list_over_select_star():
+    schema = {"ds": {"src": {"start_dt": "DATE", "end_dt": "DATE"}}}
+    sql = "CREATE OR REPLACE VIEW ds.v (business_start_dt, business_end_dt) AS SELECT * FROM ds.src"
+    (st,) = parse_sql(sql, "bigquery", schema)
+    assert edge_set([st]) == {("ds.v", "business_start_dt", "ds.src", "start_dt"),
+                              ("ds.v", "business_end_dt", "ds.src", "end_dt")}
+    assert not st.warnings
+    (bare,) = parse_sql(sql, "bigquery")                  # no schema: one clear warning, not one per column
+    assert bare.edges == [] and len(bare.warnings) == 1 and "SELECT *" in bare.warnings[0]
+
+
+def test_dollar_placeholders_are_rendered():
+    from codelineage.templating import SqlRenderer
+    r = SqlRenderer([], {"project": "acme-prod", "env": {"ds": "curated"}})
+    out = r.render("CREATE OR REPLACE VIEW ${project}.${env.ds}.v AS SELECT a FROM ${unknown_var}.t")
+    assert out == "CREATE OR REPLACE VIEW acme-prod.curated.v AS SELECT a FROM unknown_var.t"
+    (st,) = parse_sql(out, "bigquery")
+    assert st.target_table == "curated.v"
+
+
+def test_repeated_column_failures_become_one_warning():
+    from codelineage.sql_parser import _collapse
+    ws = [f"column c{i}: Cannot find column 'c{i}' in query." for i in range(8)] + ["something else"]
+    out = _collapse(ws)
+    assert len(out) == 2 and out[1].startswith("8 columns (c0, c1, c2, c3, c4, ...): Cannot find column '<col>'")

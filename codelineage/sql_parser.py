@@ -7,6 +7,7 @@ subqueries are resolved down to physical tables; the CTE names passed through ar
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 import sqlglot
@@ -133,6 +134,7 @@ def _column_root(col: str, query: exp.Query, schema: Schema | None, dialect, war
 def _query_lineage(target: str, query: exp.Query, columns: list[str], schema: Schema | None,
                    dialect: str | None, drop_catalog: bool, warnings: list[str]) -> list[ColumnEdge]:
     edges = []
+    outer_warnings, warnings = warnings, []
     # One call traces every output column with a shared cache (qualifying the query once); a
     # per-column call re-analyses the whole query each time, which is slow on wide tables.
     # trim_selects=False skips building a trimmed copy of every CTE per hop (only used for display
@@ -179,13 +181,49 @@ def _query_lineage(target: str, query: exp.Query, columns: list[str], schema: Sc
                                                 ambiguous=True))
             else:
                 edges.append(ColumnEdge(target, col.lower(), None, None, transformation))
+    outer_warnings.extend(_collapse(warnings))
     return edges
+
+
+def _collapse(warnings: list[str]) -> list[str]:
+    """'column a: X', 'column b: X', ... -> '2 columns (a, b): X', so one problem is one warning."""
+    groups: dict[str, list[str]] = {}
+    other = []
+    for w in warnings:
+        m = re.match(r"column (\S+): (.*)", w, re.S)
+        if not m:
+            other.append(w)
+            continue
+        msg = m.group(2).replace(f"'{m.group(1)}'", "'<col>'").replace(f" {m.group(1)}:", " <col>:")
+        groups.setdefault(msg, []).append(m.group(1))
+    out = list(other)
+    for msg, cols in groups.items():
+        if len(cols) == 1:
+            out.append(f"column {cols[0]}: {msg.replace('<col>', cols[0])}")
+        else:
+            shown = ", ".join(cols[:5]) + (", ..." if len(cols) > 5 else "")
+            out.append(f"{len(cols)} columns ({shown}): {msg}")
+    return out
+
+
+def _expand_stars(query: exp.Query, schema: Schema | None, dialect) -> exp.Query | None:
+    """The query with * expanded from the schema, or None if a * can't be expanded."""
+    if schema is None:
+        return None
+    try:
+        q = qualify(query.copy(), schema=schema, dialect=dialect, validate_qualify_columns=False, identify=False)
+    except Exception:  # noqa: BLE001
+        return None
+    stars = [e for sel in ([q] if isinstance(q, exp.Select) else q.find_all(exp.Select))
+             if not sel.find_ancestor(exp.CTE, exp.Subquery) for e in sel.expressions
+             if isinstance(e, exp.Star) or (isinstance(e, exp.Column) and isinstance(e.this, exp.Star))]
+    return None if stars else q
 
 
 def _output_columns(query: exp.Query, schema: Schema | None, dialect) -> list[str]:
     if query.is_star and schema:
         try:  # expands SELECT * using the known schema
-            query = qualify(query.copy(), schema=schema, dialect=dialect, validate_qualify_columns=False)
+            query = qualify(query.copy(), schema=schema, dialect=dialect, validate_qualify_columns=False, identify=False)
         except Exception:  # noqa: BLE001
             pass
     return [c for c in query.named_selects if c and c != "*"]
@@ -427,6 +465,17 @@ def _statement_lineage(stmt: exp.Expr, dialect, schema: Schema | None, drop_cata
         return None
     target = table_name(target_expr, drop_catalog)
     if col_names:
+        if any(isinstance(e, exp.Star) or (isinstance(e, exp.Column) and isinstance(e.this, exp.Star))
+               for sel in ([query] if isinstance(query, exp.Select) else query.find_all(exp.Select))
+               if not sel.find_ancestor(exp.CTE, exp.Subquery) for e in sel.expressions):
+            # `CREATE VIEW v (a, b) AS SELECT * ...`: expand the * so names can be matched by position
+            expanded = _expand_stars(query, schema, dialect)
+            if expanded is None:
+                warnings.append("could not determine output columns (column list over SELECT * on a "
+                                "table missing from the schema)")
+                return StatementLineage(target, kind, _physical_tables(query, drop_catalog),
+                                        [c.lower() for c in col_names], [], _filters(query), None, warnings)
+            query = expanded
         query = _alias_outputs(query, col_names)
         columns = col_names
     else:
