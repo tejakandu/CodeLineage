@@ -39,7 +39,7 @@ def _pick(row: dict, key: str):
 
 
 def _rows(path: Path) -> list[dict]:
-    text = path.read_text(errors="replace")
+    text = path.read_text(encoding="utf-8", errors="replace")
     if path.suffix in (".csv", ".tsv"):
         delim = "\t" if path.suffix == ".tsv" else ","
         return [{k.strip().lower(): v for k, v in r.items() if k} for r in csv.DictReader(text.splitlines(), delimiter=delim)]

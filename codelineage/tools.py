@@ -53,7 +53,7 @@ class LineageService:
         if self.repo_root:
             p = (self.repo_root / rel).resolve()
             if p.is_relative_to(self.repo_root) and p.is_file():
-                return p.read_text(errors="replace")
+                return p.read_text(encoding="utf-8", errors="replace")
         if self.remote:
             try:
                 return self.remote.read_text(f"files/{rel}")

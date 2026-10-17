@@ -31,11 +31,11 @@ class LineageGraph:
     # ---------- persistence ----------
     @classmethod
     def load(cls, path: str | Path) -> "LineageGraph":
-        return cls(json.loads(Path(path).read_text()))
+        return cls(json.loads(Path(path).read_text(encoding="utf-8")))
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps(self.data, indent=2, default=list))
+        Path(path).write_text(json.dumps(self.data, indent=2, default=list), encoding="utf-8")
 
     # ---------- lookup ----------
     def all_tables(self) -> list[str]:

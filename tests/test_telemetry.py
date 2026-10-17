@@ -63,7 +63,7 @@ def test_interaction_and_feedback_rows_reach_bigquery(tmp_path):
     assert interaction["traced_columns"] == ["fct_daily_revenue.net_revenue"]
     assert interaction["total_tokens"] == 1500 and interaction["graph_built_at"]
     assert feedback["interaction_id"] == interaction["interaction_id"] and feedback["feedback_rating"] == -1
-    assert len((tmp_path / "log.jsonl").read_text().splitlines()) == 2
+    assert len((tmp_path / "log.jsonl").read_text(encoding="utf-8").splitlines()) == 2
 
 
 def test_failed_turn_is_logged_with_error():

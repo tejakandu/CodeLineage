@@ -75,7 +75,7 @@ def _classify(value) -> tuple[str | None, str | None]:
 
 def parse_dag_file(path: Path) -> list[SqlTask]:
     try:
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
     except (SyntaxError, UnicodeDecodeError):
         return []
 

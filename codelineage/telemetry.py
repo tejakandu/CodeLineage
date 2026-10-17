@@ -161,7 +161,7 @@ class InteractionLogger:
     def _write(self, rows: list[dict]) -> None:
         if self.log_file:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
-            with self.log_file.open("a") as f:
+            with self.log_file.open("a", encoding="utf-8") as f:
                 for r in rows:
                     f.write(json.dumps(r, default=str) + "\n")
         if self.bq_table:
@@ -277,7 +277,7 @@ def trending(graph, days: int = 14, limit: int = 15, log_file: str | None = None
         except Exception as e:  # noqa: BLE001
             log.warning("trending from BigQuery failed: %s", e)
     if source is None and log_file and Path(log_file).exists():
-        for line in Path(log_file).read_text().splitlines():
+        for line in Path(log_file).read_text(encoding="utf-8", errors="replace").splitlines():
             try:
                 row = json.loads(line)
             except ValueError:

@@ -83,10 +83,10 @@ def test_cached_graph_redownloads_only_when_changed(gcs, tmp_path):
     store = GcsStore("gs://b/p", client=gcs)
     store.upload_text("graph.json", '{"tables": {}, "edges": []}')
     path = store.download_cached("graph.json")
-    path.write_text("locally modified")              # proves the next call doesn't re-download
-    assert store.download_cached("graph.json").read_text() == "locally modified"
+    path.write_text("locally modified", encoding="utf-8")              # proves the next call doesn't re-download
+    assert store.download_cached("graph.json").read_text(encoding="utf-8") == "locally modified"
     store.upload_text("graph.json", '{"tables": {"a": {}}, "edges": []}')   # new generation
-    assert '"a"' in store.download_cached("graph.json").read_text()
+    assert '"a"' in store.download_cached("graph.json").read_text(encoding="utf-8")
 
 
 def test_cached_graph_used_when_gcs_unreachable(gcs):
@@ -97,7 +97,7 @@ def test_cached_graph_used_when_gcs_unreachable(gcs):
     class Down:
         def bucket(self, name):
             raise ConnectionError("no network")
-    assert GcsStore("gs://b/p", client=Down()).download_cached("graph.json").read_text() == "{}"
+    assert GcsStore("gs://b/p", client=Down()).download_cached("graph.json").read_text(encoding="utf-8") == "{}"
 
 
 class FakeRow(dict):

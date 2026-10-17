@@ -83,12 +83,12 @@ class GcsStore:
             blob = self.bucket.get_blob(self._name(rel))
             if blob is None:
                 raise FileNotFoundError(self.uri(rel))
-            if not (target.exists() and stamp.exists() and stamp.read_text() == str(blob.generation)):
+            if not (target.exists() and stamp.exists() and stamp.read_text(encoding="utf-8") == str(blob.generation)):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 tmp = target.with_name(target.name + ".tmp")
-                tmp.write_text(blob.download_as_text())
+                tmp.write_text(blob.download_as_text(), encoding="utf-8")
                 tmp.replace(target)
-                stamp.write_text(str(blob.generation))
+                stamp.write_text(str(blob.generation), encoding="utf-8")
         except FileNotFoundError:
             raise
         except Exception as e:  # noqa: BLE001

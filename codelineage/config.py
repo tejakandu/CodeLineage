@@ -27,7 +27,7 @@ class LineageConfig:
         path = Path(config_file) if config_file else root / "lineage.yaml"
         data = {}
         if path.exists():
-            data = yaml.safe_load(path.read_text()) or {}
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         known = {f for f in cls.__dataclass_fields__ if f != "repo_root"}
         unknown = set(data) - known
         if unknown:

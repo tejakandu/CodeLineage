@@ -27,9 +27,9 @@ def load_config_values(paths: list[Path]) -> dict:
         for f in files:
             try:
                 if f.suffix in (".yaml", ".yml"):
-                    data = yaml.safe_load(f.read_text())
+                    data = yaml.safe_load(f.read_text(encoding="utf-8"))
                 elif f.suffix == ".json":
-                    data = json.loads(f.read_text())
+                    data = json.loads(f.read_text(encoding="utf-8"))
                 else:
                     continue
             except Exception:

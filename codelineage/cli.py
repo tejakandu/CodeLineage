@@ -11,6 +11,9 @@ from .tools import DEFAULT_GRAPH, LineageService
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):  # Windows code pages can't print the lineage tree's └ ◆ ⤷
+            stream.reconfigure(errors="replace")
     ap = argparse.ArgumentParser(prog="codelineage")
     ap.add_argument("--repo", default=".", help="path to the SQL repo (containing lineage.yaml)")
     ap.add_argument("--graph", help=f"graph JSON path (default <repo>/{DEFAULT_GRAPH})")
@@ -101,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         from .telemetry import trending
         trend = trending(svc.graph) if os.environ.get("CODELINEAGE_LOG_FILE") else None
         Path(args.out).write_text(render_explorer(svc.graph, svc.repo_root, include_sql=not args.no_sql,
-                                                  trending=trend, read_file=svc.read_file))
+                                                  trending=trend, read_file=svc.read_file), encoding="utf-8")
         print(f"Wrote {args.out}: open it in any browser (or VS Code: Simple Browser / Live Preview).")
     elif args.cmd == "web":
         from .web import serve

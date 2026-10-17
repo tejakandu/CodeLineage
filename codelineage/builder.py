@@ -45,7 +45,7 @@ def _inferred_columns(statements: list[StatementLineage]) -> dict[str, dict]:
 
 def _git_commit(root: Path) -> str | None:
     try:
-        out = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5)
+        out = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         return out.stdout.strip() or None if out.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):
         return None
@@ -57,12 +57,12 @@ def _bigquery_schema(cfg: LineageConfig, warnings: list[str], bq_client=None) ->
     try:
         data = load_bigquery_schema(cfg.schema_bigquery, cfg.drop_catalog, bq_client)
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps(data))
+        cache.write_text(json.dumps(data), encoding="utf-8")
         return data
     except Exception as e:  # noqa: BLE001
         if cache.exists():
             warnings.append(f"BigQuery INFORMATION_SCHEMA unavailable ({e}); using cached copy from {cache.name}")
-            return json.loads(cache.read_text())
+            return json.loads(cache.read_text(encoding="utf-8"))
         warnings.append(f"BigQuery INFORMATION_SCHEMA unavailable and no cache: {e}")
         return {}
 
@@ -115,10 +115,10 @@ def build_graph(cfg: LineageConfig, bq_client=None) -> LineageGraph:
             if f in seen or _excluded(f, root, cfg.exclude):
                 continue
             seen.add(f)
-            units.append((str(f.relative_to(root)), f.read_text(errors="replace"), tasks_by_file.get(f, [])))
+            units.append((str(f.relative_to(root)), f.read_text(encoding="utf-8", errors="replace"), tasks_by_file.get(f, [])))
     for f, ts in tasks_by_file.items():  # referenced by DAGs but outside sql_paths
         if f not in seen:
-            units.append((str(f.relative_to(root)) if f.is_relative_to(root) else str(f), f.read_text(errors="replace"), ts))
+            units.append((str(f.relative_to(root)) if f.is_relative_to(root) else str(f), f.read_text(encoding="utf-8", errors="replace"), ts))
 
     rendered = [(name, raw, renderer.render(raw, ts[0].params if ts else None), ts) for name, raw, ts in units]
 

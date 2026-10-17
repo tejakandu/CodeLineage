@@ -116,7 +116,7 @@ def test_trending_from_log_file(service, tmp_path, monkeypatch):
         {"ts": now, "user_id": "a", "traced_columns": ["fct_daily_revenue.net_revenue"]},
         {"ts": now, "user_id": "b", "traced_columns": ["mart.fct_daily_revenue.net_revenue", "raw.orders.status"]},
         {"ts": "2001-01-01T00:00:00", "user_id": "c", "traced_columns": ["raw.orders.status"]},
-    ]))
+    ]), encoding="utf-8")
     monkeypatch.delenv("CODELINEAGE_BQ_TABLE", raising=False)
     t = trending(service.graph, days=7, log_file=str(log))
     top = t["items"][0]

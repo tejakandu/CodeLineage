@@ -27,7 +27,7 @@ def read_repo_file(repo_root: Path, path: str) -> str | None:
     p = (repo_root / path).resolve()
     if not p.is_relative_to(repo_root.resolve()) or not p.is_file() or p.stat().st_size > MAX_FILE_BYTES:
         return None
-    return p.read_text(errors="replace")
+    return p.read_text(encoding="utf-8", errors="replace")
 
 
 def render_explorer(graph: LineageGraph, repo_root: str | Path | None, *, mode: str = "static",
@@ -47,5 +47,5 @@ def render_explorer(graph: LineageGraph, repo_root: str | Path | None, *, mode: 
         boot["trending"] = trending
     # "</" would end the <script> element early; "<\/" is the same string to JavaScript.
     payload = json.dumps(boot, default=list).replace("</", "<\\/")
-    template = resources.files("codelineage").joinpath("static/explorer.html").read_text()
+    template = resources.files("codelineage").joinpath("static/explorer.html").read_text(encoding="utf-8")
     return template.replace("/*__BOOT__*/null", payload, 1)

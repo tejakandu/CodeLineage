@@ -148,8 +148,8 @@ def test_unqualified_join_columns_flagged_without_schema_and_resolved_with_it():
 def test_information_schema_formats(tmp_path):
     (tmp_path / "cols.csv").write_text(
         "TABLE_CATALOG,TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,DATA_TYPE,DESCRIPTION\n"
-        "p,Raw,Orders,Order_ID,STRING,Order key\n")
-    (tmp_path / "more.json").write_text('{"ref": {"fx": {"usd_rate": "NUMERIC"}}}')
+        "p,Raw,Orders,Order_ID,STRING,Order key\n", encoding="utf-8")
+    (tmp_path / "more.json").write_text('{"ref": {"fx": {"usd_rate": "NUMERIC"}}}', encoding="utf-8")
     info = load_information_schema([tmp_path])
     assert info["raw.orders"]["order_id"] == {"type": "STRING", "description": "Order key"}
     assert info["ref.fx"]["usd_rate"]["type"] == "NUMERIC"
@@ -184,3 +184,16 @@ def test_stale_schema_does_not_lose_lineage():
                       "bigquery", schema)
     assert ("s.t", "net", "raw.orders", "discount_amount") in edge_set([st])
     assert any("INFORMATION_SCHEMA may be stale" in w for w in st.warnings)
+
+
+def test_cli_never_relies_on_the_platform_encoding(tmp_path):
+    """Windows defaults to cp1252; every file read/write must name its encoding (regression)."""
+    import shutil
+    import subprocess
+    import sys
+    repo = tmp_path / "repo"
+    shutil.copytree(SAMPLE, repo, ignore=shutil.ignore_patterns(".lineage"))
+    base = [sys.executable, "-X", "warn_default_encoding", "-W", "error::EncodingWarning", "-m", "codelineage", "--repo", str(repo)]
+    for args in (["build"], ["trace", "rpt_region_kpis", "total_revenue"], ["explore", "--out", str(tmp_path / "x.html")]):
+        r = subprocess.run(base + args, capture_output=True, text=True, encoding="utf-8")
+        assert r.returncode == 0, r.stderr[-2000:]
