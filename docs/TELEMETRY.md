@@ -10,17 +10,17 @@ export CODELINEAGE_BQ_TABLE=my-proj.codelineage.interactions   # chat, web and M
 export CODELINEAGE_LOG_FILE=.lineage/interactions.jsonl
 ```
 
-The identity writing rows needs `roles/bigquery.dataEditor` on the dataset. That's the web
-server's service account, or each user's ADC credentials for CLI/MCP. Writes are batched on a
+The identity writing rows is each user's own Google account (`gcloud auth application-default login`), which needs
+`roles/bigquery.dataEditor` on the dataset. Writes are batched on a
 background thread; if BigQuery is down the chat keeps working and a warning is logged.
 
 ## What gets captured, by surface
 
 | Surface | Question | Answer | Tool calls | User |
 |---|---|---|---|---|
-| `web` chat window | ✅ | ✅ | ✅ | IAP email (`X-Goog-Authenticated-User-Email`) when behind IAP |
-| `cli` chat | ✅ | ✅ | ✅ | `CODELINEAGE_USER` or OS user |
-| `mcp` (Gemini Code Assist / Gemini CLI) | ❌ | ❌ | ✅ | `CODELINEAGE_USER` or OS user |
+| `web` (Lineage Terminal on localhost) | ✅ | ✅ | ✅ | Google account from `gcloud auth application-default login` |
+| `cli` chat | ✅ | ✅ | ✅ | Google account |
+| `mcp` (Gemini Code Assist / Gemini CLI) | ❌ | ❌ | ✅ | Google account |
 
 Through Gemini Code Assist, Google's client owns the conversation: the MCP server is only called for
 tools, so it never sees the prompt or the final answer. You still learn what people look up (every

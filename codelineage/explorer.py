@@ -30,13 +30,16 @@ def read_repo_file(repo_root: Path, path: str) -> str | None:
     return p.read_text(errors="replace")
 
 
-def render_explorer(graph: LineageGraph, repo_root: str | Path, *, mode: str = "static",
-                    include_sql: bool = True, chat: bool = False, trending: dict | None = None) -> str:
-    repo_root = Path(repo_root)
+def render_explorer(graph: LineageGraph, repo_root: str | Path | None, *, mode: str = "static",
+                    include_sql: bool = True, chat: bool = False, trending: dict | None = None,
+                    read_file=None) -> str:
+    """read_file(path) -> text overrides reading from repo_root (e.g. files published to GCS)."""
+    if read_file is None:
+        read_file = (lambda f: read_repo_file(Path(repo_root), f)) if repo_root else (lambda f: None)
     files = {}
     if include_sql and mode == "static":
         for f in sorted(referenced_files(graph)):
-            text = read_repo_file(repo_root, f)
+            text = read_file(f)
             if text is not None:
                 files[f] = text
     boot = {"graph": graph.data, "files": files, "mode": mode, "chat": chat, "version": __version__}

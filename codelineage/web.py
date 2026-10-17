@@ -1,6 +1,8 @@
-"""Serves the Lineage Terminal with Gemini chat, live SQL and trending (standard library only).
+"""Serves the Lineage Terminal on the user's own machine, with Gemini chat, SQL and trending.
 
-Open it in a browser, or inside VS Code with "Simple Browser: Show"."""
+Runs on localhost only: open it in a browser, or inside VS Code with "Simple Browser: Show". Gemini,
+BigQuery and GCS calls use the user's own Google credentials (Application Default Credentials).
+"""
 from __future__ import annotations
 
 import json
@@ -10,22 +12,19 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from .explorer import read_repo_file, referenced_files, render_explorer
+from .explorer import referenced_files, render_explorer
 
-from .telemetry import InteractionLogger, traced_columns, trending
+from .telemetry import InteractionLogger, default_user, traced_columns, trending
 from .tools import LineageService
-
-def _user(headers) -> str | None:
-    # Identity-Aware Proxy puts the signed-in user here as "accounts.google.com:alice@corp.com".
-    v = headers.get("X-Goog-Authenticated-User-Email")
-    return v.split(":", 1)[-1] if v else None
-
 
 def serve(service: LineageService, host: str = "127.0.0.1", port: int = 8765, model: str | None = None,
           logger: InteractionLogger | None = None) -> None:
     from .gemini_chat import LineageChat
 
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        raise SystemExit("The Lineage Terminal has no sign-in of its own; serve it on localhost only.")
     logger = logger or InteractionLogger.from_env()
+    user = default_user()
     sessions: dict[str, LineageChat] = {}
     lock = threading.Lock()
     page = render_explorer(service.graph, service.repo_root, mode="server", chat=True).encode()
@@ -46,7 +45,7 @@ def serve(service: LineageService, host: str = "127.0.0.1", port: int = 8765, mo
                 self._send(200, page, "text/html; charset=utf-8")
             elif url.path == "/api/file":
                 path = parse_qs(url.query).get("path", [""])[0]
-                text = read_repo_file(service.repo_root, path) if path in allowed_files else None
+                text = service.read_file(path) if path in allowed_files else None
                 if text is None:
                     return self._send(404, b"not found", "text/plain")
                 self._send(200, text.encode(), "text/plain; charset=utf-8")
@@ -65,7 +64,7 @@ def serve(service: LineageService, host: str = "127.0.0.1", port: int = 8765, mo
                 sid = str(req.get("session") or uuid.uuid4())
                 with lock:
                     chat = sessions.get(sid) or sessions.setdefault(sid, LineageChat(
-                        service, model, logger=logger, surface="web", user_id=_user(self.headers), session_id=sid))
+                        service, model, logger=logger, surface="web", user_id=user, session_id=sid))
                 if self.path == "/api/feedback":
                     chat.feedback(str(req["interaction_id"]), 1 if int(req["rating"]) > 0 else -1, req.get("comment"))
                     return self._send(200, b"{}", "application/json")
@@ -79,5 +78,5 @@ def serve(service: LineageService, host: str = "127.0.0.1", port: int = 8765, mo
             except Exception as e:  # noqa: BLE001
                 self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
 
-    print(f"CodeLineage Lineage Terminal on http://{host}:{port}")
+    print(f"CodeLineage Lineage Terminal on http://{host}:{port}  (signed in to Google as {user})")
     ThreadingHTTPServer((host, port), Handler).serve_forever()

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -55,6 +56,25 @@ def _rows(path: Path) -> list[dict]:
     return rows
 
 
+def _accumulate(rows, out: dict, drop_catalog: bool) -> dict:
+    for row in rows:
+        table, column = _pick(row, "table"), _pick(row, "column")
+        if not table or not column:
+            continue
+        parts = [] if drop_catalog else [_pick(row, "catalog")]
+        parts += [_pick(row, "schema"), table]
+        name = ".".join(p for p in parts if p).lower()
+        column = column.lower()
+        if "." in column:  # nested STRUCT field path: keep only the top-level column
+            column = column.split(".")[0]
+        info = out.setdefault(name, {}).setdefault(column, {})
+        for key in ("type", "description", "ordinal"):
+            v = _pick(row, key)
+            if v and key not in info:
+                info[key] = v
+    return out
+
+
 def load_information_schema(paths: list[Path], drop_catalog: bool = True) -> dict[str, dict[str, dict]]:
     """Returns ``{table: {column: {"type", "description", "ordinal"}}}`` with lowercase names
     shaped like the graph's table names (``schema.table`` when drop_catalog)."""
@@ -62,24 +82,33 @@ def load_information_schema(paths: list[Path], drop_catalog: bool = True) -> dic
     for base in paths:
         files = [base] if base.is_file() else sorted(base.rglob("*")) if base.exists() else []
         for f in files:
-            if f.suffix not in (".csv", ".tsv", ".json", ".jsonl", ".ndjson"):
-                continue
-            for row in _rows(f):
-                table, column = _pick(row, "table"), _pick(row, "column")
-                if not table or not column:
-                    continue
-                parts = [] if drop_catalog else [_pick(row, "catalog")]
-                parts += [_pick(row, "schema"), table]
-                name = ".".join(p for p in parts if p).lower()
-                column = column.lower()
-                if "." in column:  # nested STRUCT field path: keep only the top-level column
-                    column = column.split(".")[0]
-                cols = out.setdefault(name, {})
-                info = cols.setdefault(column, {})
-                for key in ("type", "description", "ordinal"):
-                    v = _pick(row, key)
-                    if v and key not in info:
-                        info[key] = v
+            if f.suffix in (".csv", ".tsv", ".json", ".jsonl", ".ndjson"):
+                _accumulate(_rows(f), out, drop_catalog)
+    return out
+
+
+_BQ_SCOPE = re.compile(r"^[a-z][a-z0-9.:-]*[a-z0-9]\.(region-[a-z0-9-]+|[A-Za-z_][A-Za-z0-9_]*)$")
+
+
+def load_bigquery_schema(scopes: list[str], drop_catalog: bool = True, client=None) -> dict[str, dict[str, dict]]:
+    """Reads column names, types and descriptions straight from BigQuery INFORMATION_SCHEMA.
+
+    Each scope is ``project.region-xx`` (every dataset in that region) or ``project.dataset``.
+    Uses COLUMN_FIELD_PATHS (top-level fields only) because it carries column descriptions.
+    Needs bigquery.jobUser on the project and metadata read access on the datasets."""
+    from google.cloud import bigquery
+
+    client = client or bigquery.Client()
+    out: dict[str, dict[str, dict]] = {}
+    for scope in scopes:
+        if not _BQ_SCOPE.match(scope):
+            raise ValueError(f"schema_bigquery entry must be project.region-xx or project.dataset, got {scope!r}")
+        project, where = scope.rsplit(".", 1)
+        sql = (f"SELECT table_catalog, table_schema, table_name, column_name, data_type, description "
+               f"FROM `{project}`.`{where}`.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS "
+               f"WHERE field_path = column_name")
+        rows = client.query(sql).result()   # billed to the client's default project
+        _accumulate((dict(r.items()) for r in rows), out, drop_catalog)
     return out
 
 

@@ -577,6 +577,7 @@ function updateTicker() {
   const items = [["TABLES", built], ["SOURCES", src], ["COLUMNS", fmt(totalCols)], ["EDGES", fmt((G.edges || []).length)], ["DAGS", dags.size], ["SQL FILES", files.size],
     ["COVERAGE", `<b class="${cov >= 95 ? "ok" : "warn"}">${cov}%</b>`], ["AMBIGUOUS", `<b class="${amb ? "warn" : "ok"}">${amb}</b>`], ["WARNINGS", `<b class="${warn ? "warn" : "ok"}">${warn}</b>`],
     ["DIALECT", (G.dialect || "auto").toUpperCase()], ["BUILT", (G.built_at || "").replace("T", " ").slice(0, 16) + " UTC"]];
+  if (G.git_commit) items.push(["COMMIT", G.git_commit.slice(0, 8)]);
   $("#ticker").innerHTML = items.map(([l, v]) => `<div class="t">${l}${String(v).startsWith("<b") ? v : `<b>${v}</b>`}</div>`).join("");
 }
 function updateChrome() {

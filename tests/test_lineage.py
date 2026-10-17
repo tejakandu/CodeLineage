@@ -175,3 +175,12 @@ def test_complex_script_traces_through_temp_table_and_procedure(graph):
     assert sources(tree) == {("raw.orders", "gross_amount"), ("raw.orders", "discount_amount"),
                              ("ref.fx_rates_daily", "usd_rate"), ("raw.customer_flags", "vip_tier")}
     assert "sql/mart/dim_customer_ltv.sql::tmp_customer_orders" in graph.tables
+
+
+def test_stale_schema_does_not_lose_lineage():
+    # the schema export predates the discount_amount column
+    schema = {"raw": {"orders": {"order_id": "UNKNOWN", "gross_amount": "UNKNOWN"}}}
+    (st,) = parse_sql("CREATE TABLE s.t AS SELECT o.order_id, o.gross_amount - o.discount_amount AS net FROM raw.orders o",
+                      "bigquery", schema)
+    assert ("s.t", "net", "raw.orders", "discount_amount") in edge_set([st])
+    assert any("INFORMATION_SCHEMA may be stale" in w for w in st.warnings)

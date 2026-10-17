@@ -15,7 +15,9 @@ import uuid
 from .telemetry import InteractionLogger, ToolRecorder, traced_columns
 from .tools import SYSTEM_PROMPT, LineageService
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+# Stable Flash: strong tool calling, fast, cheap. Override with CODELINEAGE_MODEL; check
+# https://cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions for retirement dates.
+DEFAULT_MODEL = "gemini-3.8-flash"
 
 
 class LineageChat:

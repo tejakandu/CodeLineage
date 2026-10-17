@@ -13,27 +13,53 @@ from urllib.parse import urlencode
 
 from .builder import build_graph
 from .config import LineageConfig
+from .gcs import GcsStore, is_gcs
 from .graph import LineageGraph
 
 DEFAULT_GRAPH = ".lineage/graph.json"
 
 
 class LineageService:
-    def __init__(self, graph: LineageGraph, repo_root: str | Path):
+    def __init__(self, graph: LineageGraph, repo_root: str | Path | None, remote: GcsStore | None = None):
         self.graph = graph
-        self.repo_root = Path(repo_root).resolve()
+        self.repo_root = Path(repo_root).resolve() if repo_root else None
+        self.remote = remote   # published copy of the SQL files, when the graph comes from GCS
 
     @classmethod
     def from_env(cls, repo: str | None = None, graph_path: str | None = None, rebuild: bool = False) -> "LineageService":
+        """Graph from CODELINEAGE_GRAPH (a local path or gs://…/graph.json), else <repo>/.lineage,
+        building it from the local SQL repo if missing."""
         repo = repo or os.environ.get("CODELINEAGE_REPO", ".")
+        graph_path = graph_path or os.environ.get("CODELINEAGE_GRAPH")
+        if graph_path and is_gcs(graph_path):
+            if rebuild:
+                raise ValueError("Can't rebuild a graph that lives in GCS; build locally and `codelineage publish`.")
+            store, name = GcsStore.for_object(graph_path)
+            graph = LineageGraph.load(store.download_cached(name))
+            local = Path(repo).resolve()
+            return cls(graph, local if (local / "lineage.yaml").exists() else None, store)
         cfg = LineageConfig.load(repo)
-        path = Path(graph_path or os.environ.get("CODELINEAGE_GRAPH") or cfg.repo_root / DEFAULT_GRAPH)
+        path = Path(graph_path or cfg.repo_root / DEFAULT_GRAPH)
         if rebuild or not path.exists():
             graph = build_graph(cfg)
             graph.save(path)
         else:
             graph = LineageGraph.load(path)
         return cls(graph, cfg.repo_root)
+
+    def read_file(self, path: str) -> str | None:
+        """A repo file from the local clone if there is one, else from the copy published to GCS."""
+        rel = path.split("::")[0]
+        if self.repo_root:
+            p = (self.repo_root / rel).resolve()
+            if p.is_relative_to(self.repo_root) and p.is_file():
+                return p.read_text(errors="replace")
+        if self.remote:
+            try:
+                return self.remote.read_text(f"files/{rel}")
+            except Exception:  # noqa: BLE001
+                return None
+        return None
 
     # ----- helpers -----
     def _resolve(self, table: str, column: str | None = None) -> tuple[str | None, str | None, str | None]:
@@ -133,10 +159,10 @@ class LineageService:
         return f"{direction.upper()} TABLE LINEAGE of {t}\n" + "\n".join(lines)
 
     def read_sql_file(self, path: str, start_line: int = 1, end_line: int = 200) -> str:
-        p = (self.repo_root / path.split("::")[0]).resolve()
-        if not p.is_relative_to(self.repo_root) or not p.is_file():
+        text = self.read_file(path)
+        if text is None:
             return f"File not found in repo: {path}"
-        lines = p.read_text(errors="replace").splitlines()
+        lines = text.splitlines()
         start, end = max(1, start_line), min(len(lines), end_line)
         return "\n".join(f"{i:5d}  {lines[i - 1]}" for i in range(start, end + 1))
 

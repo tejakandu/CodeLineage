@@ -22,6 +22,7 @@ class FakeChat:
     """Stands in for LineageChat: calls the real trace tool, returns markdown."""
 
     def __init__(self, service, model=None, **kw):
+        self.user_id = kw.get("user_id")
         self.recorder = ToolRecorder()
         self.trace = self.recorder.wrap(service.tool_functions()[3])
         self.last_interaction_id, self.last_tool_calls, self.feedbacks = None, [], []
@@ -29,7 +30,7 @@ class FakeChat:
     def ask(self, q):
         self.trace(table="rpt_region_kpis", column="total_revenue", direction="upstream")
         self.last_tool_calls, self.last_interaction_id = self.recorder.reset(), "i1"
-        return "**Summary**: comes from raw.orders\n\n| Level | Column |\n|---|---|\n| 0 | total_revenue |"
+        return f"**Summary**: comes from raw.orders (asked by {self.user_id})\n\n| Level | Column |\n|---|---|\n| 0 | total_revenue |"
 
     def feedback(self, *a):
         self.feedbacks.append(a)
@@ -40,23 +41,32 @@ def service():
     return LineageService(build_graph(LineageConfig.load(SAMPLE)), SAMPLE)
 
 
-@pytest.fixture(scope="module")
-def server(service):
-    orig = gemini_chat.LineageChat
-    gemini_chat.LineageChat = FakeChat
+def start(service, **kw):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    threading.Thread(target=web.serve, args=(service, "127.0.0.1", port), daemon=True).start()
+    threading.Thread(target=web.serve, args=(service, "127.0.0.1", port), kwargs=kw, daemon=True).start()
     base = f"http://127.0.0.1:{port}"
-    for _ in range(50):
+    for _ in range(100):
         try:
-            urllib.request.urlopen(base + "/")
-            break
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return base
         except OSError:
             time.sleep(0.05)
-    yield base
+    return base
+
+
+@pytest.fixture(scope="module", autouse=True)
+def fake_gemini():
+    orig = gemini_chat.LineageChat
+    gemini_chat.LineageChat = FakeChat
+    yield
     gemini_chat.LineageChat = orig
+
+
+@pytest.fixture(scope="module")
+def server(service, fake_gemini):
+    return start(service)
 
 
 def get(url):
@@ -113,3 +123,9 @@ def test_trending_from_log_file(service, tmp_path, monkeypatch):
     assert top["column"] == "mart.fct_daily_revenue.net_revenue" and top["lookups"] == 2 and top["users"] == 2
     assert len(top["series"]) == 7 and top["series"][-1] == 2
     assert {i["column"]: i["lookups"] for i in t["items"]}["raw.orders.status"] == 1   # old row excluded
+
+
+
+def test_server_refuses_non_localhost(service):
+    with pytest.raises(SystemExit, match="localhost"):
+        web.serve(service, "0.0.0.0", 0)

@@ -106,11 +106,10 @@ If your admin has turned off agent mode or MCP, use B or C. They use the same to
 
 ```bash
 # Vertex AI (usual inside a company)
-export GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=my-proj GOOGLE_CLOUD_LOCATION=us-central1
-gcloud auth application-default login
-# or: export GOOGLE_API_KEY=...
+export GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=my-proj GOOGLE_CLOUD_LOCATION=global
+gcloud auth application-default login       # your Google account
 
-export CODELINEAGE_MODEL=gemini-2.5-flash   # any Gemini model with function calling (pro for harder SQL)
+export CODELINEAGE_MODEL=gemini-3.8-flash   # the default; see docs/DEPLOYMENT.md for model choice
 python -m codelineage --repo /path/to/sql-repo chat
 python -m codelineage --repo /path/to/sql-repo chat "what breaks if I drop raw.orders.discount_amount?"
 ```
@@ -121,8 +120,20 @@ python -m codelineage --repo /path/to/sql-repo chat "what breaks if I drop raw.o
 python -m codelineage --repo /path/to/sql-repo web --port 8765   # http://127.0.0.1:8765
 ```
 
-The interactive graph plus a Gemini chat panel (see above). To share it, run it on an internal VM
-or Cloud Run behind IAP. It binds to localhost by default and has no auth of its own.
+The interactive graph plus a Gemini chat panel (see above). It runs on each user's own machine
+(localhost only) with their own Google credentials. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+for setup, IAM roles and which Gemini model to use.
+
+## Sharing through Cloud Storage
+
+The only Google Cloud services used are **Gemini (Vertex AI), BigQuery and Cloud Storage**. A
+maintainer builds and publishes; everyone else reads the published graph, with no clone of the SQL
+repo:
+
+```bash
+codelineage --repo . publish gs://acme-lineage/prod --build      # maintainer, after merges
+export CODELINEAGE_GRAPH=gs://acme-lineage/prod/graph.json         # everyone (MCP, chat, web)
+```
 
 ## Usage analytics (BigQuery)
 
@@ -146,7 +157,8 @@ sql_paths: [sql]
 dag_paths: [dags]
 config_paths: [config]       # YAML/JSON values available to Jinja as params.x, var.value.x, x
 template_searchpath: [sql]   # where DAG sql="x.sql" / {% include %} paths are resolved
-schema_files: [metadata/information_schema_columns.csv]   # INFORMATION_SCHEMA.COLUMNS export
+schema_files: [metadata/information_schema_columns.csv]   # INFORMATION_SCHEMA.COLUMNS export, or:
+schema_bigquery: [my-proj.region-us]   # read INFORMATION_SCHEMA straight from BigQuery
 exclude: ["sql/scratch/*"]
 drop_catalog: true           # project.dataset.table == dataset.table
 variables: { ds: "2024-01-01" }
@@ -155,10 +167,11 @@ variables: { ds: "2024-01-01" }
 Then run `codelineage build`. Read the warnings it prints: they list files it couldn't parse and DAG
 SQL references it couldn't resolve. Fix those by adding variables or paths.
 
-**Keeping it fresh:** run `codelineage build` in CI on merge to main (or nightly), and publish
-`.lineage/graph.json` somewhere everyone can read it (commit it, or put it in GCS and set
-`CODELINEAGE_GRAPH`). The MCP server and chat only read the graph, so answers come back fast.
+**Keeping it fresh:** after SQL changes are merged, run `codelineage publish gs://… --build`
+(see [Sharing through Cloud Storage](#sharing-through-cloud-storage)). The MCP server and chat only
+read the graph, so answers come back fast, and the ticker shows which commit the graph was built from.
 
+No database server is needed: the graph is a JSON file and usage logs go to BigQuery.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how parsing and storage work, the graph
 format, and the full complex-SQL coverage table.
 
@@ -200,6 +213,7 @@ codelineage/
   explorer.py      renders the Lineage Terminal (static file or served)
   static/explorer.html  the Lineage Terminal UI (vanilla JS + SVG, no dependencies)
   web.py           serves the Lineage Terminal + chat, SQL, trending APIs
+  gcs.py           publish to / read from Cloud Storage (cached locally)
   telemetry.py     prompt/answer/tool-call logging to BigQuery and/or JSONL
 examples/sample_repo/   SQL + DAGs + config used by the tests
 ```

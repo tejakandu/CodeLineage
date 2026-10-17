@@ -116,8 +116,17 @@ def _query_lineage(target: str, query: exp.Query, columns: list[str], schema: di
         try:
             root = lineage(col, query, schema=schema, dialect=dialect)
         except Exception as e:  # noqa: BLE001 - sqlglot raises many types
-            warnings.append(f"column {col}: {e}")
-            continue
+            if not schema:
+                warnings.append(f"column {col}: {e}")
+                continue
+            # Usually a stale/partial INFORMATION_SCHEMA (a column added since the export): resolve
+            # without the schema rather than lose the column's lineage.
+            try:
+                root = lineage(col, query, schema={}, dialect=dialect)
+                warnings.append(f"column {col}: resolved without schema ({e}); INFORMATION_SCHEMA may be stale")
+            except Exception as e2:  # noqa: BLE001
+                warnings.append(f"column {col}: {e2}")
+                continue
         transformation = _expr_sql(root, dialect)
         found = False
         for leaf, via, steps in _leaves(root, [], [], dialect):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .builder import build_graph
@@ -33,6 +34,10 @@ def main(argv: list[str] | None = None) -> int:
     x = sub.add_parser("explore", help="write the interactive Lineage Terminal as one HTML file")
     x.add_argument("--out", default="lineage.html")
     x.add_argument("--no-sql", action="store_true", help="don't embed SQL source files")
+    pb = sub.add_parser("publish", help="upload graph, Lineage Terminal and SQL files to gs://bucket/prefix")
+    pb.add_argument("uri", help="gs://bucket/prefix")
+    pb.add_argument("--build", action="store_true", help="rebuild the graph from the repo first")
+    pb.add_argument("--no-sql", action="store_true", help="don't upload SQL files")
     b = sub.add_parser("bq-init", help="create the BigQuery table for prompt/answer logging")
     b.add_argument("table", help="project.dataset.table")
     b.add_argument("--retention-days", type=int, default=400, help="partition expiry (0 = keep forever)")
@@ -53,6 +58,19 @@ def main(argv: list[str] | None = None) -> int:
               f"{len(graph.edges)} column edges, {len(graph.data['warnings'])} warnings")
         for w_ in graph.data["warnings"][:50]:
             print("  warning:", w_)
+        return 0
+
+    if args.cmd == "publish":
+        from .gcs import is_gcs, publish
+        if not is_gcs(args.uri):
+            ap.error("publish needs a gs://bucket/prefix URI")
+        svc = LineageService.from_env(args.repo, args.graph, rebuild=args.build)
+        if svc.repo_root is None:
+            ap.error("publish needs the SQL repo checked out locally (--repo)")
+        m = publish(svc.graph, svc.repo_root, args.uri, include_sql=not args.no_sql)
+        print(f"Published {m['tables']} tables / {m['edges']} edges / {m['files']} files "
+              f"(commit {str(m['git_commit'])[:8]}) to {args.uri}\n"
+              f"Users set CODELINEAGE_GRAPH={m['uri']}")
         return 0
 
     svc = LineageService.from_env(args.repo, args.graph)
@@ -81,8 +99,9 @@ def main(argv: list[str] | None = None) -> int:
 
         from .explorer import render_explorer
         from .telemetry import trending
-        trend = trending(svc.graph) if __import__("os").environ.get("CODELINEAGE_LOG_FILE") else None
-        Path(args.out).write_text(render_explorer(svc.graph, svc.repo_root, include_sql=not args.no_sql, trending=trend))
+        trend = trending(svc.graph) if os.environ.get("CODELINEAGE_LOG_FILE") else None
+        Path(args.out).write_text(render_explorer(svc.graph, svc.repo_root, include_sql=not args.no_sql,
+                                                  trending=trend, read_file=svc.read_file))
         print(f"Wrote {args.out}: open it in any browser (or VS Code: Simple Browser / Live Preview).")
     elif args.cmd == "web":
         from .web import serve

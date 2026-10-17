@@ -37,7 +37,7 @@ SCHEMA = [
     ("interaction_id", "STRING", "NULLABLE", "Question/answer turn; feedback rows point at it"),
     ("session_id", "STRING", "NULLABLE", "Chat session (several turns)"),
     ("surface", "STRING", "NULLABLE", "cli | web | mcp"),
-    ("user_id", "STRING", "NULLABLE", "IAP email on web; CODELINEAGE_USER or OS user elsewhere"),
+    ("user_id", "STRING", "NULLABLE", "Google account behind the user's credentials (or CODELINEAGE_USER)"),
     ("model", "STRING", "NULLABLE", "Gemini model id"),
     ("question", "STRING", "NULLABLE", "User prompt"),
     ("answer", "STRING", "NULLABLE", "Model output"),
@@ -71,9 +71,32 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def default_user() -> str | None:
+@functools.lru_cache(maxsize=1)
+def google_account() -> str | None:
+    """Email of the Google identity behind Application Default Credentials (the same identity that
+    calls Gemini, BigQuery and GCS): `gcloud auth application-default login` for people, or a
+    service account."""
     try:
-        return os.environ.get("CODELINEAGE_USER") or getpass.getuser()
+        import google.auth
+        from google.auth.transport.requests import AuthorizedSession, Request
+        creds, _ = google.auth.default(scopes=["openid", "https://www.googleapis.com/auth/userinfo.email",
+                                               "https://www.googleapis.com/auth/cloud-platform"])
+        email = getattr(creds, "service_account_email", None)
+        if email and email != "default":
+            return email
+        creds.refresh(Request())
+        r = AuthorizedSession(creds).get("https://oauth2.googleapis.com/tokeninfo",
+                                         params={"access_token": creds.token}, timeout=5)
+        return r.json().get("email") if r.ok else None
+    except Exception as e:  # noqa: BLE001
+        log.info("could not read Google account from ADC: %s", e)
+        return None
+
+
+def default_user() -> str | None:
+    """CODELINEAGE_USER if set, else the user's Google account, else the OS user."""
+    try:
+        return os.environ.get("CODELINEAGE_USER") or google_account() or getpass.getuser()
     except Exception:  # noqa: BLE001
         return None
 

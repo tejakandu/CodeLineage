@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import fnmatch
+import json
+import subprocess
 import logging
 import re
 from dataclasses import asdict
@@ -13,7 +15,7 @@ import yaml
 from .config import LineageConfig
 from .dag_parser import SqlTask, parse_dag_file
 from .graph import LineageGraph
-from .schema import load_information_schema, to_sqlglot_schema
+from .schema import load_bigquery_schema, load_information_schema, to_sqlglot_schema
 from .sql_parser import StatementLineage, parse_sql
 from .templating import SqlRenderer, load_config_values
 
@@ -41,7 +43,31 @@ def _inferred_columns(statements: list[StatementLineage]) -> dict[str, dict]:
     return out
 
 
-def build_graph(cfg: LineageConfig) -> LineageGraph:
+def _git_commit(root: Path) -> str | None:
+    try:
+        out = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or None if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _bigquery_schema(cfg: LineageConfig, warnings: list[str], bq_client=None) -> dict:
+    """INFORMATION_SCHEMA from BigQuery, cached in .lineage/ so builds still work offline."""
+    cache = cfg.repo_root / ".lineage" / "information_schema.json"
+    try:
+        data = load_bigquery_schema(cfg.schema_bigquery, cfg.drop_catalog, bq_client)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(data))
+        return data
+    except Exception as e:  # noqa: BLE001
+        if cache.exists():
+            warnings.append(f"BigQuery INFORMATION_SCHEMA unavailable ({e}); using cached copy from {cache.name}")
+            return json.loads(cache.read_text())
+        warnings.append(f"BigQuery INFORMATION_SCHEMA unavailable and no cache: {e}")
+        return {}
+
+
+def build_graph(cfg: LineageConfig, bq_client=None) -> LineageGraph:
     root = cfg.repo_root
     searchpath = cfg.resolve(cfg.template_searchpath) + cfg.resolve(cfg.sql_paths) + [root]
     values = {**load_config_values(cfg.resolve(cfg.config_paths)), **cfg.variables}
@@ -98,13 +124,18 @@ def build_graph(cfg: LineageConfig) -> LineageGraph:
 
     # 3. Schema: the warehouse INFORMATION_SCHEMA (authoritative) plus columns inferred from the SQL.
     #    A first parse pass learns each built table's columns so the second can expand SELECT *.
+    early_warnings: list[str] = []
     info_schema = load_information_schema(cfg.resolve(cfg.schema_files), cfg.drop_catalog)
+    if cfg.schema_bigquery:
+        for t, cols in _bigquery_schema(cfg, early_warnings, bq_client).items():
+            for c, info in cols.items():
+                info_schema.setdefault(t, {}).setdefault(c, info)
     first = [s for name, _, sql, _ in rendered for s in parse_sql(sql, cfg.dialect, None, cfg.drop_catalog, name)]
     schema = to_sqlglot_schema(info_schema, _inferred_columns(first))
 
     tables: dict[str, dict] = {}
     edges: list[dict] = []
-    warnings: list[str] = list(unresolved)
+    warnings: list[str] = list(unresolved) + early_warnings
     for name, raw, sql, ts in rendered:
         statements = parse_sql(sql, cfg.dialect, schema, cfg.drop_catalog, name)
         if not statements and re.search(r"\b(insert|create|merge|update)\b", sql, re.I):
@@ -142,6 +173,7 @@ def build_graph(cfg: LineageConfig) -> LineageGraph:
     return LineageGraph({
         "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "repo_root": str(root),
+        "git_commit": _git_commit(root),
         "dialect": cfg.dialect,
         "tables": tables,
         "edges": edges,
