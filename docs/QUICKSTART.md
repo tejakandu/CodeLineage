@@ -68,6 +68,7 @@ template_searchpath: [sql]        # where DAG sql="x.sql" / {% include %} paths 
 exclude: ["sql/scratch/*"]        # optional
 drop_catalog: true                # treat project.dataset.table == dataset.table
 schema_bigquery: [my-project.region-us]   # read INFORMATION_SCHEMA live (or project.dataset)
+bigquery_project: my-data-project       # project that runs that query (needs BigQuery Job User there)
 # schema_files: [metadata/columns.csv]    # ...or an exported INFORMATION_SCHEMA.COLUMNS file
 variables:                        # values for template variables not in config files
   ds: "2024-01-01"

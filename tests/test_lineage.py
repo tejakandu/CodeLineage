@@ -427,10 +427,38 @@ def test_bigquery_schema_job_project(monkeypatch):
         def __init__(self, project=None):
             seen["project"] = project
 
-        def query(self, sql):
-            seen["sql"] = sql
+        def query(self, sql, location=None):
+            seen["sql"], seen["location"] = sql, location
             return type("J", (), {"result": lambda s: []})()
     monkeypatch.setattr(bigquery, "Client", Client)
-    load_bigquery_schema(["dp-qa-derived-e0f9.region-us"], project="ag-np-dev-agent-def1")
-    assert seen["project"] == "ag-np-dev-agent-def1"
-    assert "`dp-qa-derived-e0f9`.`region-us`.INFORMATION_SCHEMA" in seen["sql"]
+    load_bigquery_schema(["dp-qa-derived-e0f9.region-northamerica-northeast1"], project="dp-qa-derived-e0f9")
+    assert seen["project"] == "dp-qa-derived-e0f9"
+    assert "`dp-qa-derived-e0f9`.`region-northamerica-northeast1`.INFORMATION_SCHEMA" in seen["sql"]
+    assert seen["location"] == "northamerica-northeast1"
+    load_bigquery_schema(["dp-qa-derived-e0f9.product_common_claim_rt_qa_sit3"])
+    assert seen["location"] is None
+
+
+def test_duplicate_file_names_prefer_the_one_with_logic(tmp_path):
+    (tmp_path / "dags").mkdir()
+    for folder, sql in (("bigquery/ddl_master/derived", "CREATE TABLE IF NOT EXISTS ds.activity (id STRING, amt NUMERIC)"),
+                        ("bigquery/dml", "INSERT INTO ds.activity (id, amt) SELECT id, amt FROM raw.activity_src")):
+        (tmp_path / folder).mkdir(parents=True)
+        (tmp_path / folder / "activity.sql").write_text(sql, encoding="utf-8")
+    for folder in ("bigquery/a", "bigquery/b"):                  # both have logic: truly ambiguous
+        (tmp_path / folder).mkdir(parents=True)
+        (tmp_path / folder / "both.sql").write_text("INSERT INTO ds.x (id) SELECT id FROM raw.y", encoding="utf-8")
+    (tmp_path / "dags" / "d.py").write_text('''
+p1 = "activity.sql"
+p2 = "both.sql"
+with DAG(dag_id="act") as d:
+    t1 = execute_sql_fn.override(task_id="load_activity")(args, p1)
+    t2 = execute_sql_fn.override(task_id="load_both")(args, p2)
+''', encoding="utf-8")
+    (tmp_path / "lineage.yaml").write_text("dialect: bigquery\nsql_paths: [bigquery]\ndag_paths: [dags]\n", encoding="utf-8")
+    g = build_graph(LineageConfig.load(tmp_path))
+    runs = {(b["file"], b.get("task_id")) for b in g.tables["ds.activity"]["built_by"]}
+    assert ("bigquery/dml/activity.sql", "load_activity") in runs
+    w = g.data["warnings"]
+    assert any("both.sql: 2 files have this name" in x for x in w)
+    assert not any("SQL file not found" in x for x in w)          # duplicates are not "not found"

@@ -67,6 +67,15 @@ def _bigquery_schema(cfg: LineageConfig, warnings: list[str], bq_client=None) ->
 
 
 SLOW_FILE_SECONDS = 30
+AMBIGUOUS = Path("<ambiguous>")
+_WRITES = re.compile(r"\b(insert\s+into|merge\s+|update\s+\S+\s+set|as\s*\(?\s*(with|select)\b)", re.I)
+
+
+def _writes_from_query(path: Path) -> bool:
+    try:
+        return bool(_WRITES.search(read_text(path)))
+    except OSError:
+        return False
 
 
 def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGraph:
@@ -112,12 +121,17 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
                     return p
         # A bare file name (query_sql_path = "all_claims_view.sql"): use the one SQL file with that name.
         matches = by_name.get(Path(ref).name.lower(), [])
+        if len(matches) > 1:
+            # Same name in several folders (e.g. ddl_master/x.sql defines the table, dml/x.sql loads it):
+            # a DAG task runs logic, so prefer the one file that writes data from a query.
+            matches = [m for m in matches if _writes_from_query(m)] or matches
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
             ambiguous_refs.add(f"{ref}: {len(matches)} files have this name "
                                f"({', '.join(m.relative_to(root).as_posix() for m in matches[:3])}); "
-                               "add the folder to template_searchpath")
+                               "add the right folder to template_searchpath")
+            return AMBIGUOUS
         return None
 
     tasks_by_file: dict[Path, list[SqlTask]] = {}
@@ -126,6 +140,8 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
     for t in tasks:
         if t.sql_file:
             p = resolve_template(t.sql_file)
+            if p is AMBIGUOUS:
+                continue                     # reported once per file name, not as "not found"
             if p:
                 tasks_by_file.setdefault(p, []).append(t)
             else:

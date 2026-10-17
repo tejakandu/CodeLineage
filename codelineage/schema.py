@@ -109,7 +109,11 @@ def load_bigquery_schema(scopes: list[str], drop_catalog: bool = True, client=No
         sql = (f"SELECT table_catalog, table_schema, table_name, column_name, data_type, description "
                f"FROM `{project}`.`{where}`.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS "
                f"WHERE field_path = column_name")
-        rows = client.query(sql).result()   # billed to the client's default project
+        # region-scoped INFORMATION_SCHEMA must run in that region (e.g. northamerica-northeast1);
+        # dataset-scoped queries let BigQuery pick the dataset's location.
+        location = where[len("region-"):] if where.startswith("region-") else None
+        job = client.query(sql, location=location) if location else client.query(sql)
+        rows = job.result()   # runs in (and is billed to) the client's project
         _accumulate((dict(r.items()) for r in rows), out, drop_catalog)
     return out
 
