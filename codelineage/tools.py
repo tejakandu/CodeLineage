@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlencode
 
 from .builder import build_graph
 from .config import LineageConfig
@@ -89,7 +90,12 @@ class LineageService:
         filters = {name: sorted({f for b in bs for f in b.get("filters", [])}) for name, bs in built.items()}
         schedules = {name: sorted({f"{b['dag_id']}.{b['task_id']} ({b.get('schedule')})" for b in bs if b.get("dag_id")})
                      for name, bs in built.items()}
-        return "\n".join([
+        explorer = os.environ.get("CODELINEAGE_EXPLORER_URL")
+        link = None
+        if explorer:  # deep link into the Lineage Terminal, focused on this column
+            params = {"f": f"{t}.{c}", "m": "col", "d": "up" if direction == "upstream" else "down", "n": max_depth}
+            link = f"{explorer.rstrip('/')}/#{urlencode(params)}"
+        return "\n".join(([f"INTERACTIVE GRAPH: {link}", ""] if link else []) + [
             f"{direction.upper()} LINEAGE of {t}.{c}",
             "",
             "TREE (each ⤷ line is the SQL expression that produces the parent column, with file and Airflow task):",
@@ -195,7 +201,8 @@ How to work:
    toward the raw sources (or toward consumers for downstream).
    **Filters & joins** that affect the values (e.g. status = 'COMPLETE').
    **Source tables** - the raw tables at the end of the chain (marked SOURCE).
-   **Diagram** - repeat the mermaid block from the tool output unchanged.
+   **Diagram** - repeat the mermaid block from the tool output unchanged. If the tool output has an
+   INTERACTIVE GRAPH link, put it first as "[Open interactive lineage](link)".
 4. Column types and descriptions from the warehouse INFORMATION_SCHEMA appear in parentheses; use
    them to explain columns in business terms. Hops marked AMBIGUOUS are best guesses (unqualified
    column in a join with no schema): say so explicitly.

@@ -22,6 +22,40 @@ mart.rpt_region_kpis.total_revenue
          └─ raw.orders.discount_amount  ◆ SOURCE
 ```
 
+## The Lineage Terminal
+
+An interactive, Bloomberg-style lineage explorer. It's one self-contained HTML file: no CDN, no
+install, works on a locked-down network.
+
+![Lineage Terminal](docs/images/terminal.png)
+
+```bash
+codelineage --repo /path/to/sql-repo explore --out lineage.html   # static file, share it anywhere
+codelineage --repo /path/to/sql-repo web                          # served: + Gemini chat, trending
+```
+
+In VS Code: run `codelineage web`, then **Simple Browser: Show** → `http://127.0.0.1:8765`. Set
+`CODELINEAGE_EXPLORER_URL=http://127.0.0.1:8765` and every Gemini Code Assist lineage answer
+includes an "Open interactive lineage" link that jumps straight to the column.
+
+| Panel | What it shows |
+|---|---|
+| **Command line** (`/`) | Fuzzy autocomplete over every table/column; anything else is sent to Gemini as a question, and the graph follows the answer |
+| **Canvas** | Column-level graph laid out source → target, tables as cards coloured by layer, edges coloured by what happens (pass-through · transform · aggregate · conditional · ⚠ ambiguous). Hover a column to light up its whole chain with animated flow; hover an edge for the exact SQL expression, CTE steps, file:line and DAG task |
+| **Modes** | Upstream / downstream / both (`U` `D` `B`), column ↔ table level (`T`), depth (`[` `]`), all columns (`A`), wide canvas (`Z`), minimap, zoom/pan |
+| **DETAIL** | Type, description, KPI tiles (levels to source, source columns, DAG tasks, impacted columns/tables, ambiguous hops), each statement that builds the column with highlighted SQL, inputs, filters/joins, DAG, schedule |
+| **PATH** | Level-by-level lineage table (the same structure the LLM answers with) |
+| **IMPACT** | Blast radius: every downstream column and table by level, end consumers flagged |
+| **SQL** | The actual file, statement highlighted |
+| **ASK** | Gemini chat with 👍/👎 (served mode) |
+| **CATALOG · CRITICAL · TRENDING · HEALTH** | Tables by layer · columns ranked by blast radius and lineage depth · most-looked-up columns with 14-day sparklines (from the usage log) · coverage %, ambiguous edges, build warnings |
+| **Ticker** | Repo-wide key figures: tables, sources, columns, edges, DAGs, coverage, warnings, graph build time |
+| **Export** | SVG download, copy as Mermaid, copy a deep link (`#f=table.column&d=up&n=6`) |
+
+| Ask Gemini, the graph follows | Downstream blast radius |
+|---|---|
+| ![ask](docs/images/terminal-ask.png) | ![impact](docs/images/terminal-impact.png) |
+
 ## Why it's built this way
 
 Pasting hundreds of SQL files into an LLM and asking it to trace lineage gives answers that sound
@@ -81,13 +115,13 @@ python -m codelineage --repo /path/to/sql-repo chat
 python -m codelineage --repo /path/to/sql-repo chat "what breaks if I drop raw.orders.discount_amount?"
 ```
 
-### C. Browser chat window
+### C. Lineage Terminal in the browser (or VS Code Simple Browser)
 
 ```bash
 python -m codelineage --repo /path/to/sql-repo web --port 8765   # http://127.0.0.1:8765
 ```
 
-A single page with chat history and rendered mermaid diagrams. To share it, run it on an internal VM
+The interactive graph plus a Gemini chat panel (see above). To share it, run it on an internal VM
 or Cloud Run behind IAP. It binds to localhost by default and has no auth of its own.
 
 ## Usage analytics (BigQuery)
@@ -163,7 +197,9 @@ codelineage/
   tools.py         LLM tools + system prompt
   gemini_chat.py   Gemini (google-genai) chat with automatic function calling
   mcp_server.py    MCP server for Gemini Code Assist / Gemini CLI
-  web.py           browser chat window (with 👍/👎 feedback)
+  explorer.py      renders the Lineage Terminal (static file or served)
+  static/explorer.html  the Lineage Terminal UI (vanilla JS + SVG, no dependencies)
+  web.py           serves the Lineage Terminal + chat, SQL, trending APIs
   telemetry.py     prompt/answer/tool-call logging to BigQuery and/or JSONL
 examples/sample_repo/   SQL + DAGs + config used by the tests
 ```

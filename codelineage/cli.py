@@ -30,6 +30,9 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--port", type=int, default=8765)
     w.add_argument("--host", default="127.0.0.1")
     w.add_argument("--model")
+    x = sub.add_parser("explore", help="write the interactive Lineage Terminal as one HTML file")
+    x.add_argument("--out", default="lineage.html")
+    x.add_argument("--no-sql", action="store_true", help="don't embed SQL source files")
     b = sub.add_parser("bq-init", help="create the BigQuery table for prompt/answer logging")
     b.add_argument("table", help="project.dataset.table")
     b.add_argument("--retention-days", type=int, default=400, help="partition expiry (0 = keep forever)")
@@ -73,6 +76,14 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if q:
                 print(chat.ask(q))
+    elif args.cmd == "explore":
+        from pathlib import Path
+
+        from .explorer import render_explorer
+        from .telemetry import trending
+        trend = trending(svc.graph) if __import__("os").environ.get("CODELINEAGE_LOG_FILE") else None
+        Path(args.out).write_text(render_explorer(svc.graph, svc.repo_root, include_sql=not args.no_sql, trending=trend))
+        print(f"Wrote {args.out}: open it in any browser (or VS Code: Simple Browser / Live Preview).")
     elif args.cmd == "web":
         from .web import serve
         serve(svc, args.host, args.port, args.model)

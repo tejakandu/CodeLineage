@@ -224,3 +224,69 @@ def create_table(table_id: str, partition_expiration_days: int | None = 400, cli
     table.clustering_fields = ["event_type", "surface", "user_id"]
     table.description = "CodeLineage questions, answers, tool calls and feedback"
     return client.create_table(table, exists_ok=True)
+
+
+def trending(graph, days: int = 14, limit: int = 15, log_file: str | None = None,
+             bq_table: str | None = None, bq_client=None) -> dict:
+    """Most-looked-up columns over the last `days`, with a daily series for sparklines.
+
+    Reads the BigQuery log table if configured, else the JSONL log. Partial names users typed
+    (e.g. ``fct_daily_revenue.net_revenue``) are resolved to full graph names."""
+    from collections import Counter, defaultdict
+    from datetime import date, timedelta
+
+    log_file = log_file or os.environ.get("CODELINEAGE_LOG_FILE")
+    bq_table = bq_table or os.environ.get("CODELINEAGE_BQ_TABLE")
+    start = date.today() - timedelta(days=days - 1)
+    hits: list[tuple[str, str, str | None]] = []  # (raw name, day, user)
+    source = None
+    if bq_table:
+        try:
+            from google.cloud import bigquery
+            client = bq_client or bigquery.Client()
+            sql = f"""SELECT col, CAST(DATE(ts) AS STRING) day, user_id
+                      FROM `{bq_table}`, UNNEST(traced_columns) col
+                      WHERE DATE(ts) >= @start"""
+            job = client.query(sql, job_config=bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ScalarQueryParameter("start", "DATE", start)]))
+            hits = [(r["col"], r["day"], r["user_id"]) for r in job.result()]
+            source = "bigquery"
+        except Exception as e:  # noqa: BLE001
+            log.warning("trending from BigQuery failed: %s", e)
+    if source is None and log_file and Path(log_file).exists():
+        for line in Path(log_file).read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            day = str(row.get("ts", ""))[:10]
+            if day >= start.isoformat():
+                hits += [(c, day, row.get("user_id")) for c in row.get("traced_columns") or []]
+        source = "log file"
+    if source is None:
+        return {"items": [], "note": "No usage log configured (CODELINEAGE_LOG_FILE or CODELINEAGE_BQ_TABLE)."}
+
+    def resolve(name: str) -> str | None:
+        table, _, column = name.rpartition(".")
+        tables = graph.resolve_table(table or name)
+        if not tables:
+            return None
+        if not column or not table:
+            return tables[0]
+        cols = graph.resolve_column(tables[0], column)
+        return f"{tables[0]}.{cols[0]}" if cols else None
+
+    days_list = [(start + timedelta(days=i)).isoformat() for i in range(days)]
+    counts, users, series = Counter(), defaultdict(set), defaultdict(Counter)
+    cache: dict[str, str | None] = {}
+    for raw, day, user in hits:
+        full = cache.setdefault(raw, resolve(raw))
+        if not full:
+            continue
+        counts[full] += 1
+        series[full][day] += 1
+        if user:
+            users[full].add(user)
+    items = [{"column": c, "lookups": n, "users": len(users[c]), "series": [series[c][d] for d in days_list]}
+             for c, n in counts.most_common(limit)]
+    return {"items": items, "window": f"last {days} days · {source}"}

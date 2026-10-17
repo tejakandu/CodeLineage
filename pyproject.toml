@@ -25,3 +25,6 @@ codelineage-mcp = "codelineage.mcp_server:main"
 
 [tool.setuptools]
 packages = ["codelineage"]
+
+[tool.setuptools.package-data]
+codelineage = ["static/*.html"]

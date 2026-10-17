@@ -34,6 +34,7 @@ class LineageChat:
         self.graph_built_at = service.graph.data.get("built_at")
         self.recorder = ToolRecorder()
         self.last_interaction_id: str | None = None
+        self.last_tool_calls: list[dict] = []
         self.config = types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             tools=[self.recorder.wrap(f) for f in service.tool_functions()],
@@ -56,8 +57,8 @@ class LineageChat:
             error = f"{type(e).__name__}: {e}"
             raise
         finally:
+            calls = self.last_tool_calls = self.recorder.reset()
             if self.logger:
-                calls = self.recorder.reset()
                 self.logger.log(
                     "interaction", interaction_id=interaction_id, session_id=self.session_id,
                     surface=self.surface, user_id=self.user_id, model=self.model,

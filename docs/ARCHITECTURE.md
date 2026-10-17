@@ -86,6 +86,17 @@ Beyond that, or if you want SQL access to lineage, the same two record types map
 | SQLite / DuckDB (`edges`, `tables`, `schema` tables, indexed on target/source) | Larger repos; incremental rebuilds keyed by file hash. |
 | BigQuery dataset + recursive CTE | Share lineage with BI tools / Looker; join with job logs and data catalog. |
 
+## Lineage Terminal (visual explorer)
+
+`explorer.py` injects `graph.json` (plus the referenced SQL files, in static mode) into
+`static/explorer.html`, a single dependency-free page (vanilla JS + SVG). Everything interactive
+runs in the browser on the same edge list: BFS traversals for upstream/downstream/both, a layered
+(Sugiyama-style) layout with longest-path layering and barycentre ordering to reduce crossings,
+column rows ordered by where their inputs sit, cached closure stats for blast radius and depth.
+Served mode (`web.py`) adds `/api/chat` (the answer includes the traced columns so the graph
+follows the conversation), `/api/file` (only files referenced by the graph), `/api/trending`
+(usage log or BigQuery, cached 10 min) and `/api/feedback`.
+
 ## Complex SQL: what's covered
 
 | Construct | Status |
