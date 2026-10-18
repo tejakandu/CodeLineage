@@ -27,6 +27,8 @@ class LineageGraph:
                 self._table_cols[e["source_table"]].add(e["source_column"])
         for t, info in self.tables.items():
             self._table_cols[t].update(info.get("columns", []))
+        for t, cols in data.get("schema", {}).items():   # every column the warehouse / DDL knows
+            self._table_cols[t].update(cols)
 
     # ---------- persistence ----------
     @classmethod

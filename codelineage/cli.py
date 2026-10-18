@@ -70,7 +70,8 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--graph", help=f"graph JSON path (default <repo>/{DEFAULT_GRAPH})")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("build", help="parse the repo and write the lineage graph")
+    bp = sub.add_parser("build", help="parse the repo and write the lineage graph")
+    bp.add_argument("--refresh-schema", action="store_true", help="re-read INFORMATION_SCHEMA from BigQuery now")
     t = sub.add_parser("trace", help="print multi-level lineage for a column")
     t.add_argument("table")
     t.add_argument("column")
@@ -113,12 +114,17 @@ def _main(argv: list[str] | None = None) -> int:
         elif not cfg.dialect:
             print(f"NOTE: no 'dialect' in {cfg.config_file.name}; set it (e.g. dialect: bigquery) or "
                   "dialect-specific SQL won't parse.", file=sys.stderr)
-        graph = build_graph(cfg, progress=_progress_printer())
+        graph = build_graph(cfg, progress=_progress_printer(), refresh_schema=args.refresh_schema)
         path = Path(args.graph or cfg.repo_root / DEFAULT_GRAPH)
         graph.save(path)
         warnings = graph.data["warnings"]
         print(f"Wrote {path}: {len(graph.tables)} built tables, {len(graph.all_tables())} total, "
               f"{len(graph.edges)} column edges, {len(warnings)} warnings")
+        src = graph.data.get("schema_source")
+        if src:
+            print(f"Schema: {len(graph.data.get('schema', {}))} tables from {src['source']}"
+                  + (f" (fetched {src['fetched_at'][:16].replace('T', ' ')} UTC; --refresh-schema to update)"
+                     if src.get("source", "").startswith("cache") else ""))
         scan = graph.data.get("dag_scan") or {}
         if cfg.dag_paths:
             print(f"DAGs: {scan.get('files', 0)} files scanned, {scan.get('sql_tasks', 0)} SQL tasks found, "

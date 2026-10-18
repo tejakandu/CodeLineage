@@ -462,3 +462,31 @@ with DAG(dag_id="act") as d:
     w = g.data["warnings"]
     assert any("both.sql: 2 files have this name" in x for x in w)
     assert not any("SQL file not found" in x for x in w)          # duplicates are not "not found"
+
+
+def test_merge_and_update_subqueries_trace_to_real_tables():
+    merge = """MERGE ds.claim t
+    USING (SELECT b.claim_id, b.business_end_dt, c.contact_name
+           FROM internal.claim_base b JOIN ds.contact c ON b.contact_id = c.id) s
+    ON t.claim_id = s.claim_id
+    WHEN MATCHED THEN UPDATE SET t.business_end_dt = s.business_end_dt, t.contact_name = UPPER(s.contact_name)
+    WHEN NOT MATCHED THEN INSERT (claim_id) VALUES (claim_id)"""
+    (st,) = parse_sql(merge, "bigquery")
+    got = {(e.target_column, e.source_table, e.source_column, e.ambiguous) for e in st.edges}
+    assert got == {("business_end_dt", "internal.claim_base", "business_end_dt", False),
+                   ("contact_name", "ds.contact", "contact_name", False),
+                   ("claim_id", "internal.claim_base", "claim_id", False)}   # unqualified: only s is visible
+    assert not any("," in (e.source_table or "") for e in st.edges)
+    upd = ("UPDATE ds.claim t SET amount = s.total FROM (SELECT claim_id, SUM(amt) AS total "
+           "FROM raw.payments GROUP BY claim_id) s WHERE t.claim_id = s.claim_id")
+    (u,) = parse_sql(upd, "bigquery")
+    assert [(e.source_table, e.source_column, e.steps) for e in u.edges] == [("raw.payments", "amt", ["s: SUM(payments.amt)"])]
+
+
+def test_schema_columns_are_part_of_the_table(tmp_path):
+    from codelineage.graph import LineageGraph
+    g = LineageGraph({"tables": {"ds.claim": {"columns": ["claim_id"], "built_by": []}},
+                      "edges": [], "schema": {"ds.claim": {"claim_id": {}, "business_end_dt": {"type": "DATETIME"},
+                                                           "loss_cause_code": {"type": "STRING"}}}})
+    assert g.columns("ds.claim") == ["business_end_dt", "claim_id", "loss_cause_code"]
+    assert "ds.claim.loss_cause_code" in g.search_columns("loss_cause")

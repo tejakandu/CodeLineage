@@ -54,6 +54,7 @@ class LineageConfig:
     schema_files: list[str] = field(default_factory=list)   # INFORMATION_SCHEMA.COLUMNS exports
     schema_bigquery: list[str] = field(default_factory=list)  # read live: project.region-xx / project.dataset
     bigquery_project: str | None = None   # project that runs the INFORMATION_SCHEMA query (default: your gcloud project)
+    schema_cache_hours: float = 24         # reuse the BigQuery schema for this long (build --refresh-schema to force)
     exclude: list[str] = field(default_factory=list)
     drop_catalog: bool = True
     variables: dict = field(default_factory=dict)

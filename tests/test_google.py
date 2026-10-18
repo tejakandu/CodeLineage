@@ -141,10 +141,21 @@ def test_build_uses_bigquery_schema_and_caches_it(tmp_path):
     g = build_graph(cfg, bq_client=FakeBq(BQ_ROWS))
     assert g.column_info("raw.orders", "gross_amount")["description"] == "Order amount before discounts"
     assert (repo / ".lineage" / "information_schema.json").exists()
-    # BigQuery down: falls back to the cache, with a warning
-    g2 = build_graph(cfg, bq_client=FakeBq(fail=True))
+    assert g.data["schema_source"]["source"] == "bigquery"
+    # within schema_cache_hours: reused without asking BigQuery at all
+    quiet = FakeBq(BQ_ROWS)
+    g1 = build_graph(cfg, bq_client=quiet)
+    assert quiet.sql == [] and g1.data["schema_source"]["source"] == "cache"
+    assert g1.column_info("raw.orders", "gross_amount")["type"] == "NUMERIC"
+    # --refresh-schema while BigQuery is down: falls back to the cache, with a warning
+    g2 = build_graph(cfg, bq_client=FakeBq(fail=True), refresh_schema=True)
     assert g2.column_info("raw.orders", "gross_amount")["type"] == "NUMERIC"
     assert any("using cached copy" in w for w in g2.data["warnings"])
+    # a different schema_bigquery list is not served from the old cache
+    cfg.schema_bigquery = ["acme-prod.raw"]
+    other = FakeBq(BQ_ROWS)
+    build_graph(cfg, bq_client=other)
+    assert other.sql
 
 
 def test_user_identity_precedence(monkeypatch):

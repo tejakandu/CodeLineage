@@ -229,11 +229,41 @@ def _output_columns(query: exp.Query, schema: Schema | None, dialect) -> list[st
     return [c for c in query.named_selects if c and c != "*"]
 
 
-def _assignment_edges(target: str, pairs: list[tuple[str, exp.Expr]], alias_map: dict[str, str],
-                      dialect) -> tuple[list[ColumnEdge], list[str]]:
-    """Edges for `col = expr` style assignments (MERGE, UPDATE)."""
-    others = sorted({t for a, t in alias_map.items() if t != target})
+def _subquery_sources(query: exp.Query, column: str, schema, dialect, drop_catalog: bool):
+    """(source table, source column, steps) for one output column of a USING/FROM subquery."""
+    root = None
+    for sch in ((schema, None) if schema is not None else (None,)):
+        try:
+            root = lineage(column, query, schema=sch or {}, dialect=dialect, trim_selects=False)
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    if root is None:
+        return [], None
+    inner = _expr_sql(root, dialect)
+    return [(table_name(leaf.source, drop_catalog), leaf.name.split(".")[-1].lower(), steps)
+            for leaf, _via, steps in _leaves(root, [], [], dialect)], inner
+
+
+def _assignment_edges(target: str, pairs: list[tuple[str, exp.Expr]], alias_map: dict,
+                      dialect, schema=None, drop_catalog: bool = True) -> tuple[list[ColumnEdge], list[str]]:
+    """Edges for `col = expr` style assignments (MERGE, UPDATE). alias_map values are table names or,
+    for `USING (SELECT ...) s`, the subquery itself, traced column by column to its real sources."""
+    others = [v for v in dict.fromkeys(alias_map.values(), None) if v is not None and v != target]
     edges, columns = [], []
+
+    def via(source, alias: str, col: str, sql: str, col_name: str, ambiguous: bool = False) -> None:
+        if isinstance(source, exp.Query):
+            found, inner = _subquery_sources(source, col, schema, dialect, drop_catalog)
+            for tbl, src_col, steps in found:
+                edges.append(ColumnEdge(target, col_name, tbl, src_col, sql, [alias],
+                                        [f"{alias}: {inner}"] + steps, ambiguous))
+            if not found:
+                for tbl in _physical_tables(source, drop_catalog):   # couldn't trace: flag every input
+                    edges.append(ColumnEdge(target, col_name, tbl, col, sql, [alias], ambiguous=True))
+        else:
+            edges.append(ColumnEdge(target, col_name, source, col, sql, ambiguous=ambiguous))
+
     for col_name, value in pairs:
         col_name = col_name.lower()
         columns.append(col_name)
@@ -242,31 +272,49 @@ def _assignment_edges(target: str, pairs: list[tuple[str, exp.Expr]], alias_map:
         if not refs:
             edges.append(ColumnEdge(target, col_name, None, None, sql))
         for c in refs:
-            if c.table:
-                edges.append(ColumnEdge(target, col_name, alias_map.get(c.table.lower(), c.table.lower()),
-                                        c.name.lower(), sql))
+            alias, col = c.table.lower(), c.name.lower()
+            if alias:
+                via(alias_map.get(alias, alias), alias, col, sql, col_name)
             elif len(others) == 1:
-                edges.append(ColumnEdge(target, col_name, others[0], c.name.lower(), sql))
+                via(others[0], next(a for a, v in alias_map.items() if v is others[0]), col, sql, col_name)
             else:
-                for t in others or [target]:
-                    edges.append(ColumnEdge(target, col_name, t, c.name.lower(), sql, ambiguous=len(others) > 1))
+                for o in others or [target]:
+                    a = next((k for k, v in alias_map.items() if v is o), "")
+                    via(o, a, col, sql, col_name, ambiguous=len(others) > 1)
     return edges, list(dict.fromkeys(columns))
 
 
-def _alias_map(target_expr: exp.Table, target: str, sources: list[exp.Expr], drop_catalog: bool) -> dict[str, str]:
-    alias_map = {target_expr.alias_or_name.lower(): target, target_expr.name.lower(): target}
+def _inside_subquery(node: exp.Expr, top: exp.Expr) -> bool:
+    """True if node sits inside a subquery at or below `top` (other than being that subquery)."""
+    p = node.parent
+    while p is not None:
+        if isinstance(p, exp.Subquery):
+            return True
+        if p is top:
+            return False
+        p = p.parent
+    return False
+
+
+def _alias_map(target_expr: exp.Table, target: str, sources: list[exp.Expr], drop_catalog: bool) -> dict:
+    """alias -> table name, or alias -> subquery for `(SELECT ...) s`. Aliases inside a subquery stay
+    inside it (they are resolved when the subquery is traced)."""
+    alias_map: dict = {target_expr.alias_or_name.lower(): target, target_expr.name.lower(): target}
     for src in sources:
         if src is None:
             continue
-        if isinstance(src, exp.Subquery) and src.alias:
-            tables = _physical_tables(src.this, drop_catalog)
-            alias_map[src.alias.lower()] = tables[0] if len(tables) == 1 else ",".join(tables)
-        for t in src.find_all(exp.Table):
-            alias_map.setdefault(t.alias_or_name.lower(), table_name(t, drop_catalog))
+        for node in src.find_all(exp.Table, exp.Subquery):
+            if _inside_subquery(node, src):
+                continue                                   # belongs to a subquery: not visible here
+            if isinstance(node, exp.Subquery):
+                if node.alias:
+                    alias_map[node.alias.lower()] = node.this
+            else:
+                alias_map.setdefault(node.alias_or_name.lower(), table_name(node, drop_catalog))
     return alias_map
 
 
-def _merge_lineage(stmt: exp.Merge, target: str, dialect, drop_catalog):
+def _merge_lineage(stmt: exp.Merge, target: str, dialect, drop_catalog, schema=None):
     alias_map = _alias_map(stmt.this, target, [stmt.args.get("using")], drop_catalog)
     pairs = []
     for when in stmt.find_all(exp.When):
@@ -277,7 +325,7 @@ def _merge_lineage(stmt: exp.Merge, target: str, dialect, drop_catalog):
             cols = then.this.expressions if isinstance(then.this, exp.Tuple) else []
             vals = then.expression.expressions if isinstance(then.expression, exp.Tuple) else []
             pairs += [(c.name, v) for c, v in zip(cols, vals)]
-    return _assignment_edges(target, pairs, alias_map, dialect)
+    return _assignment_edges(target, pairs, alias_map, dialect, schema, drop_catalog)
 
 
 # ---------------------------------------------------------------- statement splitting / recovery
@@ -443,7 +491,7 @@ def _statement_lineage(stmt: exp.Expr, dialect, schema: Schema | None, drop_cata
         col_names = [c.name for c in stmt.this.expressions] if isinstance(stmt.this, exp.Schema) else []
     elif isinstance(stmt, exp.Merge):
         target = table_name(stmt.this, drop_catalog)
-        edges, cols = _merge_lineage(stmt, target, dialect, drop_catalog)
+        edges, cols = _merge_lineage(stmt, target, dialect, drop_catalog, schema)
         using = stmt.args.get("using")
         return StatementLineage(
             target, "MERGE", [t for t in _physical_tables(using, drop_catalog) if t != target], cols, edges,
@@ -453,7 +501,7 @@ def _statement_lineage(stmt: exp.Expr, dialect, schema: Schema | None, drop_cata
         sources = [stmt.args.get("from_") or stmt.args.get("from")] + list(stmt.args.get("joins") or [])
         alias_map = _alias_map(stmt.this, target, sources, drop_catalog)
         pairs = [(eq.this.name, eq.expression) for eq in stmt.expressions if isinstance(eq, exp.EQ)]
-        edges, cols = _assignment_edges(target, pairs, alias_map, dialect)
+        edges, cols = _assignment_edges(target, pairs, alias_map, dialect, schema, drop_catalog)
         src_tables = sorted({t for s in sources if s is not None for t in _physical_tables(s, drop_catalog)} - {target})
         where = stmt.args.get("where")
         return StatementLineage(target, "UPDATE", src_tables, cols, edges,

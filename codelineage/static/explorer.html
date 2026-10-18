@@ -273,6 +273,8 @@ for (const e of G.edges || []) {
   }
 }
 for (const t in BUILT) for (const c of BUILT[t].columns || []) addCol(t, c);
+for (const t in SCHEMA) for (const c in SCHEMA[t]) addCol(t, c);   // all warehouse / DDL columns
+const hasLineage = k => (UP.get(k) || []).length > 0 || (DOWN.get(k) || []).length > 0;
 const TABLES = [...COLS.keys()].sort();
 const isSource = t => !BUILT[t];
 const isTemp = t => t.includes("::");
@@ -451,11 +453,11 @@ function render(keepZoom) {
     g.append(sv("rect", {class: "bg", width: CW, height: p.h, rx: 3}));
     g.append(sv("rect", {class: "hd", width: CW, height: HH - 4, rx: 3}));
     g.append(sv("rect", {width: 4, height: p.h, fill: COLOR[schemaOf(t)], rx: 1}));
-    const nm = shortT(t), max = 29;
+    const badgeOn = isSource(t) || isTemp(t) || isView(t), nm = shortT(t), max = badgeOn ? 22 : 29;
     const tn = sv("text", {class: "tn", x: 12, y: 16}); tn.textContent = nm.length > max ? "…" + nm.slice(-max + 1) : nm; g.append(tn);
     const sub = sv("text", {class: "ts", x: 12, y: 29});
     const bb = (BUILT[t]?.built_by || [])[0];
-    sub.textContent = isSource(t) ? "SOURCE · " + schemaOf(t).toUpperCase() : (bb?.dag_id ? `${bb.dag_id}.${bb.task_id}` : (bb?.file || "").split("/").pop()).slice(0, 36);
+    sub.textContent = (isSource(t) ? "SOURCE · " + schemaOf(t).toUpperCase() : (bb?.dag_id ? `${bb.dag_id}.${bb.task_id}` : (bb?.file || "").split("/").pop())).slice(0, 36);
     g.append(sub);
     const badge = isSource(t) ? ["SOURCE", "var(--violet)"] : isTemp(t) ? ["TEMP", "var(--faint)"] : isView(t) ? ["VIEW", "var(--cyan)"] : null;
     if (badge) { const bt = sv("text", {class: "bd", x: CW - 8, y: 15, "text-anchor": "end", fill: badge[1]}); bt.textContent = badge[0]; g.append(bt); }
@@ -470,6 +472,7 @@ function render(keepZoom) {
       LAY.rows.get(t).forEach((c, i) => {
         const k = key(t, c), inView = VIEW.nodes.has(k);
         const r = sv("g", {class: "row" + (k === S.focus ? " focus" : "") + (k === S.sel ? " sel" : "") + (inView ? "" : " dimc"), transform: `translate(0,${HH + i * RH})`});
+        if (!hasLineage(k)) { const tt2 = sv("title"); tt2.textContent = "No lineage found in the parsed SQL"; r.append(tt2); }
         r.dataset.k = k;
         r.append(sv("rect", {class: "rb", x: 4, width: CW - 4, height: RH}));
         const cn = sv("text", {class: "cn", x: 14, y: 15}); cn.textContent = c.length > 24 ? c.slice(0, 23) + "…" : c; r.append(cn);
@@ -671,6 +674,13 @@ function renderDetail(k) {
     <div class="kpi ${down.tables.size > 3 ? "red" : ""}"><div class="v">${down.tables.size}</div><div class="l">IMPACTED TABLES</div></div>
     <div class="kpi ${up.amb ? "red" : ""}"><div class="v">${up.amb}</div><div class="l">AMBIGUOUS HOPS</div></div></div>`;
   if (isSource(t)) h += `<div class="blk"><div class="lbl">ORIGIN</div>◆ Not built by any SQL in this repo: a raw / external input (ingestion, another system).</div>`;
+  else if (!ins.length) {
+    const files = [...new Set((BUILT[t]?.built_by || []).map(b => b.file))];
+    const warns = (G.warnings || []).filter(w => files.some(f => w.startsWith(f.split("::")[0]))).slice(0, 6);
+    h += `<div class="blk"><div class="lbl">NO LINEAGE FOUND</div>This column is in the table's schema, but none of the SQL that builds <b>${esc(shortT(t))}</b> sets it in a way the parser could trace (e.g. SELECT * on a table with unknown columns, a statement that failed to parse, or SQL outside this repo).`
+      + `<div class="meta" style="display:block">${files.map(f => "📄 " + fileLink(f, null)).join("<br>")}</div>`
+      + (warns.length ? `<div class="meta" style="display:block;color:#e7b7b7">${warns.map(w => "⚠ " + esc(w)).join("<br>")}</div>` : "") + `</div>`;
+  }
   // group incoming edges by statement
   const byStmt = new Map();
   for (const e of ins) { const s = e.file + ":" + e.line; (byStmt.get(s) || byStmt.set(s, []).get(s)).push(e); }

@@ -50,18 +50,38 @@ def _git_commit(root: Path) -> str | None:
         return None
 
 
-def _bigquery_schema(cfg: LineageConfig, warnings: list[str], bq_client=None) -> dict:
-    """INFORMATION_SCHEMA from BigQuery, cached in .lineage/ so builds still work offline."""
+def _bigquery_schema(cfg: LineageConfig, warnings: list[str], bq_client=None, refresh: bool = False,
+                     info: dict | None = None) -> dict:
+    """INFORMATION_SCHEMA from BigQuery. Cached in .lineage/ and reused for schema_cache_hours (a
+    region-wide query can take minutes); also the fallback when BigQuery can't be reached."""
     cache = cfg.repo_root / ".lineage" / "information_schema.json"
+    cached = None
+    if cache.exists():
+        try:
+            cached = json.loads(cache.read_text(encoding="utf-8"))
+            if "schema" not in cached:                    # older cache: just the mapping
+                cached = {"schema": cached, "scopes": None, "fetched_at": None}
+        except ValueError:
+            cached = None
+    info = info if info is not None else {}
+    if cached and not refresh and cached.get("scopes") == cfg.schema_bigquery and cached.get("fetched_at"):
+        age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(cached["fetched_at"])).total_seconds() / 3600
+        if age_h < cfg.schema_cache_hours:
+            info.update(source="cache", fetched_at=cached["fetched_at"])
+            return cached["schema"]
     try:
         data = load_bigquery_schema(cfg.schema_bigquery, cfg.drop_catalog, bq_client, cfg.bigquery_project)
+        fetched = datetime.now(timezone.utc).isoformat(timespec="seconds")
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps(data), encoding="utf-8")
+        cache.write_text(json.dumps({"fetched_at": fetched, "scopes": cfg.schema_bigquery, "schema": data}),
+                         encoding="utf-8")
+        info.update(source="bigquery", fetched_at=fetched)
         return data
     except Exception as e:  # noqa: BLE001
-        if cache.exists():
+        if cached:
             warnings.append(f"BigQuery INFORMATION_SCHEMA unavailable ({e}); using cached copy from {cache.name}")
-            return json.loads(cache.read_text(encoding="utf-8"))
+            info.update(source="cache (BigQuery unavailable)", fetched_at=cached.get("fetched_at"))
+            return cached["schema"]
         warnings.append(f"BigQuery INFORMATION_SCHEMA unavailable and no cache: {e}")
         return {}
 
@@ -78,7 +98,7 @@ def _writes_from_query(path: Path) -> bool:
         return False
 
 
-def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGraph:
+def build_graph(cfg: LineageConfig, bq_client=None, progress=None, refresh_schema: bool = False) -> LineageGraph:
     """progress(stage, done, total, name), if given, is called as files are processed."""
     def report(stage: str, i: int, total: int, name: str) -> None:
         if progress:
@@ -178,9 +198,13 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
     # 3. Schema: the warehouse INFORMATION_SCHEMA (authoritative) plus columns inferred from the SQL.
     #    A first parse pass learns each built table's columns so the second can expand SELECT *.
     early_warnings: list[str] = []
+    schema_info: dict = {}
     info_schema = load_information_schema(cfg.resolve(cfg.schema_files), cfg.drop_catalog)
     if cfg.schema_bigquery:
-        for t, cols in _bigquery_schema(cfg, early_warnings, bq_client).items():
+        report("loading schema from BigQuery", 0, 1, ", ".join(cfg.schema_bigquery))
+        bq = _bigquery_schema(cfg, early_warnings, bq_client, refresh_schema, schema_info)
+        report("loading schema from BigQuery", 1, 1, f"{len(bq)} tables ({schema_info.get('source', '-')})")
+        for t, cols in bq.items():
             for c, info in cols.items():
                 info_schema.setdefault(t, {}).setdefault(c, info)
     first, ddl = [], {}
@@ -242,6 +266,7 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None) -> LineageGra
         "git_commit": _git_commit(root),
         "dialect": cfg.dialect,
         "config_file": str(cfg.config_file) if cfg.config_file else None,
+        "schema_source": schema_info or None,
         "tables": tables,
         "edges": edges,
         "schema": {t: {**ddl.get(t, {}), **info_schema.get(t, {})} for t in sorted(used)
