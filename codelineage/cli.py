@@ -23,6 +23,7 @@ _WARNING_KINDS = [
     ("could not read", "unreadable files"),
     ("skipped folder", "unreadable folders"),
     ("slow file", "slow files (consider excluding)"),
+    ("prod lineage", "links BigQuery recorded in prod that no SQL in this repo explains"),
 ]
 
 
@@ -93,6 +94,16 @@ def _main(argv: list[str] | None = None) -> int:
     pb.add_argument("uri", help="gs://bucket/prefix")
     pb.add_argument("--build", action="store_true", help="rebuild the graph from the repo first")
     pb.add_argument("--no-sql", action="store_true", help="don't upload SQL files")
+    pl = sub.add_parser("prod-lineage", help="export the lineage BigQuery recorded in prod (Data Lineage API)")
+    pl.add_argument("--project", required=True, help="prod project that runs the jobs")
+    pl.add_argument("--location", required=True, help="where the data lives, e.g. us or northamerica-northeast1")
+    pl.add_argument("--tables", nargs="+", help="dataset.table names in prod (default: every table the graph "
+                                                "builds, minus prod_dataset_suffix)")
+    pl.add_argument("--depth", type=int, default=3, help="hops to follow upstream (default 3)")
+    pl.add_argument("--down", action="store_true", help="follow downstream instead of upstream")
+    pl.add_argument("--out", help="file or gs://bucket/path.json (default <repo>/.lineage/prod_lineage.json)")
+    pl.add_argument("--quota-project", help="project billed for the API calls (try the prod project if you get "
+                                            "SERVICE_DISABLED or a quota-project error)")
     b = sub.add_parser("bq-init", help="create the BigQuery table for prompt/answer logging")
     b.add_argument("table", help="project.dataset.table")
     b.add_argument("--retention-days", type=int, default=400, help="partition expiry (0 = keep forever)")
@@ -103,6 +114,9 @@ def _main(argv: list[str] | None = None) -> int:
         t = create_table(args.table, args.retention_days or None)
         print(f"Ready: {t.full_table_id}. Set CODELINEAGE_BQ_TABLE={args.table} to start logging.")
         return 0
+
+    if args.cmd == "prod-lineage":
+        return _prod_lineage(args)
 
     if args.cmd == "build":
         cfg = LineageConfig.load(args.repo)
@@ -125,6 +139,12 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"Schema: {len(graph.data.get('schema', {}))} tables from {src['source']}"
                   + (f" (fetched {src['fetched_at'][:16].replace('T', ' ')} UTC; --refresh-schema to update)"
                      if src.get("source", "").startswith("cache") else ""))
+        prod = graph.data.get("prod_lineage")
+        if prod:
+            links = prod["links"]
+            print(f"Prod lineage: {len(links)} table links from {prod['source']} (fetched "
+                  f"{str(prod.get('fetched_at'))[:16].replace('T', ' ')} UTC), "
+                  f"{sum(not l['in_code'] for l in links)} not explained by the SQL")
         scan = graph.data.get("dag_scan") or {}
         if cfg.dag_paths:
             print(f"DAGs: {scan.get('files', 0)} files scanned, {scan.get('sql_tasks', 0)} SQL tasks found, "
@@ -188,6 +208,57 @@ def _main(argv: list[str] | None = None) -> int:
         from .web import serve
         serve(svc, args.host, args.port, args.model)
     return 0
+
+
+def _prod_lineage(args) -> int:
+    from . import prod_lineage
+
+    cfg = LineageConfig.load(args.repo)
+    tables = args.tables
+    if not tables:
+        path = Path(args.graph or cfg.repo_root / DEFAULT_GRAPH)
+        if not path.exists():
+            print("Error: no graph yet. Run `build` first, or pass --tables dataset.table ...", file=sys.stderr)
+            return 2
+        from .graph import LineageGraph
+        suffix = cfg.prod_dataset_suffix
+        tables = []
+        for t in LineageGraph.load(path).tables:
+            if "::" in t or "." not in t:
+                continue
+            ds, name = t.rsplit(".", 1)
+            tables.append(f"{ds[:-len(suffix)] if suffix and ds.endswith(suffix) else ds}.{name}")
+    out = args.out or str(cfg.repo_root / ".lineage" / "prod_lineage.json")
+    try:
+        data = prod_lineage.fetch(args.project, args.location, sorted(set(tables)), args.depth,
+                                  "downstream" if args.down else "upstream",
+                                  quota_project=args.quota_project, progress=_progress_printer_simple())
+    except ImportError:
+        print("Error: run  pip install google-cloud-datacatalog-lineage  in this venv first.", file=sys.stderr)
+        return 2
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        hint = ("enable the Data Lineage API, or add --quota-project <prod-project>"
+                if "SERVICE_DISABLED" in msg or "quota project" in msg.lower() else
+                "you need roles/datalineage.viewer on the prod project" if "403" in msg or "PERMISSION" in msg else
+                "check --project / --location and your gcloud login")
+        print(f"Error: {msg.splitlines()[0][:300]}\n  Hint: {hint}", file=sys.stderr)
+        return 1
+    prod_lineage.save(data, out)
+    print(f"Wrote {out}: {len(data['links'])} table links from {len(data['tables'])} starting tables.")
+    for w in data["warnings"]:
+        print(f"  NOTE: {w}", file=sys.stderr)
+    if not data["links"]:
+        print("  No links: no job wrote these tables in the last 30 days, the names differ from prod "
+              "(see prod_dataset_suffix), or --location is wrong.")
+    print("Next: add  prod_lineage: " + (args.out or ".lineage/prod_lineage.json")
+          + "  to lineage.yaml and run build.")
+    return 0
+
+
+def _progress_printer_simple():
+    show = _progress_printer()
+    return lambda done, total, name: show("searching prod lineage", done, total, name)
 
 
 if __name__ == "__main__":

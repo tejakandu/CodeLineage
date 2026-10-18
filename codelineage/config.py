@@ -55,6 +55,8 @@ class LineageConfig:
     schema_bigquery: list[str] = field(default_factory=list)  # read live: project.region-xx / project.dataset
     bigquery_project: str | None = None   # project that runs the INFORMATION_SCHEMA query (default: your gcloud project)
     schema_cache_hours: float = 24         # reuse the BigQuery schema for this long (build --refresh-schema to force)
+    prod_lineage: str | None = None        # file or gs:// written by `codelineage prod-lineage`
+    prod_dataset_suffix: str = ""          # graph dataset = prod dataset + this (graph built with another env)
     exclude: list[str] = field(default_factory=list)
     drop_catalog: bool = True
     variables: dict = field(default_factory=dict)

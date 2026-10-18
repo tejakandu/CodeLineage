@@ -187,6 +187,28 @@ Teammates then don't need the SQL repo. They set
 `.gemini/settings.json`) instead of `CODELINEAGE_REPO`. Run `publish` again after SQL changes are
 merged.
 
+## 8. Compare with what ran in prod (optional)
+
+BigQuery records lineage for jobs that actually ran (last 30 days), including loads that live outside
+your SQL repo. CodeLineage can pull those table links and show them next to the code-derived ones.
+Needs `roles/datalineage.viewer` on the prod project.
+
+```bash
+pip install -e ".[google]"          # adds google-cloud-datacatalog-lineage
+python -m codelineage --repo <sql-repo> prod-lineage --project <prod-project> --location <region>
+#   default: starts from every table the graph builds; or pass --tables dataset.table ...
+#   --depth 3 (hops upstream), --out gs://bucket/path.json to share, --quota-project <prod-project>
+```
+
+Then in `lineage.yaml`:
+```yaml
+prod_lineage: .lineage/prod_lineage.json   # or the gs:// path
+prod_dataset_suffix: ""                    # e.g. _qa if your graph uses QA dataset names and prod doesn't
+```
+and `build` again. The build prints `Prod lineage: N table links ..., M not explained by the SQL`; each
+unexplained link is a warning. In the Lineage Terminal, TABLE view draws prod-only links dashed cyan,
+and the DETAIL of a table (or of a column with no lineage) lists what prod saw writing it.
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -197,5 +219,8 @@ merged.
 | `pip` can't download | set your company's PyPI mirror (step 1) |
 | SSL errors behind a proxy | `pip config set global.cert <company-ca.pem>`; for Google calls set `REQUESTS_CA_BUNDLE` to the same file |
 | Code Assist doesn't list the tools | full path to `python.exe` in settings.json; agent mode on; reload VS Code |
+| `prod-lineage`: `SERVICE_DISABLED` / quota project | add `--quota-project <prod-project>` |
+| `prod-lineage`: `403` | you need `roles/datalineage.viewer` on the prod project |
+| `prod-lineage`: 0 links | wrong `--location`, names differ from prod (`prod_dataset_suffix`), or no job in 30 days |
 | Old graph after SQL changes | `build` again (or `publish --build` for the shared copy) |
 | `git clone`: `Filename too long` / `checkout failed` | Windows path limit. In the clone: `git config core.longpaths true` then `git restore --source=HEAD :/`. CodeLineage reads long paths itself; add folders you don't need (e.g. `bigquery/ddl_archive/*`) to `exclude` |

@@ -39,10 +39,11 @@ and gets a multi-level lineage answer plus an interactive graph.
 | `codelineage/mcp_server.py` | MCP tools for Gemini Code Assist agent mode (`.gemini/settings.json`). |
 | `codelineage/web.py`, `static/explorer.html` | "Lineage Terminal": vanilla JS/SVG layered DAG explorer plus chat, on 127.0.0.1. `A` = all columns; columns without lineage are dimmed and explain why. |
 | `codelineage/telemetry.py` | Logs prompts and answers to BigQuery (`bq-init`) and/or JSONL. |
+| `codelineage/prod_lineage.py` | Optional: exports BigQuery's own recorded lineage (Data Lineage API, Knowledge Catalog) with `prod-lineage`; `build` merges it (`prod_lineage:`, `prod_dataset_suffix:`) and flags links no SQL explains. |
 | `codelineage/gcs.py` | `publish` the graph to GCS; cached reads of `gs://` graphs. |
 | `codelineage/fsutil.py` | UTF-8 everywhere, Windows `\\?\` long paths, POSIX paths in the graph. |
 
-CLI commands: `build`, `trace`, `search`, `chat`, `web`, `explore`, `publish`, `bq-init`.
+CLI commands: `build`, `trace`, `search`, `chat`, `web`, `explore`, `publish`, `bq-init`, `prod-lineage`.
 Tests: `pytest`, all passing. They must also pass with
 `python -X warn_default_encoding -W error::EncodingWarning -m pytest`.
 
@@ -81,3 +82,13 @@ Tests: `pytest`, all passing. They must also pass with
 ## Working branch
 
 `claude/data-lineage-llm-tool-xc73zo` (PR #1 was merged earlier; open a new PR only on request).
+
+## Prod lineage (Knowledge Catalog)
+
+The user found BigQuery's built-in lineage in prod and confirmed `search_links` works with their
+account (6 upstream links for the claim table). Its limits: 30 days of history, no column-level
+lineage for multi-statement scripts (most of the repo's SQL uses DECLARE), and no file, DAG or logic.
+So it complements the parser rather than replacing it. The code exports table links (and column
+pairs when the API returns `field`) and shows prod-only links dashed in the explorer. The QA graph
+names differ from prod by a dataset suffix, which `prod_dataset_suffix` maps.
+

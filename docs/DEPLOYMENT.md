@@ -8,6 +8,7 @@ on their own machine, in VS Code, signed in with their own Google account.
 | **Vertex AI (Gemini)** | The LLM in terminal chat and the Lineage Terminal's chat. Gemini Code Assist uses its own Gemini backend |
 | **BigQuery** | Reading INFORMATION_SCHEMA at build time; the usage log table; the TRENDING panel |
 | **Cloud Storage** | The shared, published lineage graph, Lineage Terminal page and SQL files |
+| **Data Lineage API** (optional, read-only) | `codelineage prod-lineage`: the table links BigQuery recorded in prod (Knowledge Catalog lineage) |
 
 There is no database server, no web hosting and no API keys.
 
@@ -44,6 +45,7 @@ sign-in of its own.
 | Employees (if logging) | `roles/bigquery.jobUser` | project | TRENDING panel query |
 | Maintainers | `roles/storage.objectAdmin` | lineage bucket | `codelineage publish` |
 | Maintainers | `roles/bigquery.metadataViewer` + `roles/bigquery.jobUser` | warehouse datasets / project | Reading INFORMATION_SCHEMA |
+| Maintainers (optional) | `roles/datalineage.viewer` | prod project | `codelineage prod-lineage` |
 
 ## One-time setup (maintainer)
 

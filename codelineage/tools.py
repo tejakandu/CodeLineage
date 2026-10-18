@@ -106,6 +106,14 @@ class LineageService:
             out["built_by"] = info["built_by"]
         else:
             out["note"] = "Not created by any SQL in the repo: an external/raw source table."
+        prod = self.graph.prod_links(t)
+        if prod["upstream"] or prod["downstream"]:
+            brief = lambda l: {"from": l["source_table"], "to": l["target_table"], "in_code": l["in_code"],  # noqa: E731
+                               "jobs": [p["name"] for p in l["processes"]], "last_seen": l["last_seen"]}
+            out["prod_lineage"] = {"note": "table links BigQuery recorded in prod (last 30 days); "
+                                           "in_code=false means no SQL in this repo does it",
+                                   "upstream": [brief(l) for l in prod["upstream"]],
+                                   "downstream": [brief(l) for l in prod["downstream"]]}
         return json.dumps(out, indent=2)
 
     def trace_column_lineage(self, table: str, column: str, direction: str = "upstream", max_depth: int = 10) -> str:
@@ -237,8 +245,11 @@ How to work:
 4. Column types and descriptions from the warehouse INFORMATION_SCHEMA appear in parentheses; use
    them to explain columns in business terms. Hops marked AMBIGUOUS are best guesses (unqualified
    column in a join with no schema): say so explicitly.
-5. Tables named like "path/file.sql::tmp_x" are temp tables that exist only inside that script.
-6. If a column has "no source column" it is derived from a constant or row count such as COUNT(*);
+5. describe_table may include prod_lineage: table links BigQuery recorded in production. Links with
+   in_code=false ran in prod but no SQL in the repo explains them (a load or job outside the repo);
+   mention them when a column has no lineage in the code.
+6. Tables named like "path/file.sql::tmp_x" are temp tables that exist only inside that script.
+7. If a column has "no source column" it is derived from a constant or row count such as COUNT(*);
    say so. If the tool output shows truncation, offer to go deeper.
 
 Grounding rules (most important):

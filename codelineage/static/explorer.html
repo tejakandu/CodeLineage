@@ -125,6 +125,7 @@ aside{background:var(--panel);display:flex;flex-direction:column;min-height:0}
 .edge.k-case{stroke:var(--violet)}
 .edge.k-amb{stroke:var(--red);stroke-dasharray:4 3}
 .edge.k-tbl{stroke:#6b7a8c;stroke-width:2}
+.edge.k-prod{stroke:var(--cyan);stroke-width:2;stroke-dasharray:7 4}
 .edgehit{fill:none;stroke:transparent;stroke-width:10;cursor:help}
 .flow{fill:none;stroke-width:1.4;stroke-dasharray:2 10;animation:flow 1.1s linear infinite;opacity:0}
 @keyframes flow{to{stroke-dashoffset:-12}}
@@ -276,6 +277,14 @@ for (const e of G.edges || []) {
 }
 for (const t in BUILT) for (const c of BUILT[t].columns || []) addCol(t, c);
 for (const t in SCHEMA) for (const c in SCHEMA[t]) addCol(t, c);   // all warehouse / DDL columns
+// links BigQuery recorded in prod (optional): prod-only ones are drawn dashed in the table view
+const PROD = (G.prod_lineage || {}).links || [], PROD_UP = new Map(), PROD_ONLY = new Set();
+for (const l of PROD) {
+  addCol(l.source_table); addCol(l.target_table);
+  if (l.source_table === l.target_table) continue;
+  (PROD_UP.get(l.target_table) || PROD_UP.set(l.target_table, []).get(l.target_table)).push(l);
+  if (!l.in_code) PROD_ONLY.add(l.source_table + "\u0000" + l.target_table);
+}
 const hasLineage = k => (UP.get(k) || []).length > 0 || (DOWN.get(k) || []).length > 0;
 const TABLES = [...COLS.keys()].sort();
 const isSource = t => !BUILT[t];
@@ -288,8 +297,11 @@ const PALETTE = ["#c792ea","#4fc3f7","#3ddc84","#ffa028","#ff7eb6","#f0d264","#7
 const SCHEMAS = [...new Set(TABLES.map(schemaOf))].sort((a, b) => order(a) - order(b) || a.localeCompare(b));
 function order(s) { const L = ["raw","src","source","landing","bronze","ref","reference","lookup","stg","staging","silver","int","intermediate","core","dw","mart","marts","gold","rpt","report","reporting","temp"]; const i = L.findIndex(x => s === x || s.endsWith("." + x) || s.startsWith(x)); return i < 0 ? 50 : i; }
 const COLOR = Object.fromEntries(SCHEMAS.map((s, i) => [s, s === "temp" ? "#566170" : PALETTE[i % PALETTE.length]]));
-const tableEdgesUp = t => [...new Set((BUILT[t]?.built_by || []).flatMap(b => b.source_tables || []))];
+const tableEdgesUp = t => [...new Set([...(BUILT[t]?.built_by || []).flatMap(b => b.source_tables || []),
+  ...(PROD_UP.get(t) || []).filter(l => !l.in_code).map(l => l.source_table)])];
 const DOWN_T = new Map();
+for (const l of PROD) if (!l.in_code && l.source_table !== l.target_table && !BUILT[l.target_table])
+  (DOWN_T.get(l.source_table) || DOWN_T.set(l.source_table, new Set()).get(l.source_table)).add(l.target_table);
 for (const t in BUILT) for (const s of tableEdgesUp(t)) (DOWN_T.get(s) || DOWN_T.set(s, new Set()).get(s)).add(t);
 
 function edgeKind(e) {
@@ -437,7 +449,7 @@ function render(keepZoom) {
     if (e.source_table === e.target_table) { x1 = a.x + CW; x2 = a.x + CW; d = `M${x1},${y1} C${x1 + 60},${y1} ${x2 + 60},${y2} ${x2},${y2}`; }
     else if (x2 <= x1) { x1 = a.x; x2 = b.x + CW; const m = 70; d = `M${a.x + CW},${y1} C${a.x + CW + m},${y1} ${b.x - m},${y2} ${b.x},${y2}`; }
     else { const dx = Math.max(40, (x2 - x1) * .5); d = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`; }
-    const kind = e._t ? "tbl" : edgeKind(e);
+    const kind = e._t ? (PROD_ONLY.has(e.source_table + "\u0000" + e.target_table) ? "prod" : "tbl") : edgeKind(e);
     const p = sv("path", {d, class: "edge k-" + kind, "marker-end": "url(#arw)"});
     const f = sv("path", {d, class: "flow"});
     const hit = sv("path", {d, class: "edgehit"});
@@ -602,7 +614,8 @@ function updateChrome() {
     : `No ${S.dir === "up" ? "upstream sources" : "downstream uses"} · try ${S.dir === "up" ? "DOWNSTREAM" : "UPSTREAM"} or BOTH`;
   const usedSchemas = [...new Set([...V.tables.keys()].map(schemaOf))];
   const kinds = new Set(V.edges.map(edgeKind));
-  const kl = isT ? `<span><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="#6b7a8c" stroke-width="2"/></svg>table dependency</span>` :
+  const kl = isT ? `<span><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="#6b7a8c" stroke-width="2"/></svg>table dependency</span>`
+    + ([...V.tEdges].some(p => PROD_ONLY.has(p)) ? `<span><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" class="edge k-prod" style="opacity:1"/></svg>seen in prod only (no SQL here)</span>` : "") :
     ["pass", "fn", "agg", "case", "amb"].filter(k => kinds.has(k)).map(k => `<span><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" class="edge k-${k}" style="opacity:1"/></svg>${KIND_LABEL[k]}</span>`).join("");
   $("#legend").innerHTML = `<div class="lg">${usedSchemas.map(s => `<span><i class="sw" style="background:${COLOR[s]}"></i>${esc(s)}</span>`).join("")}</div><div class="lg" style="margin-top:5px">${kl}${!isT && V.derived.size ? '<span><b style="color:var(--amber)">ƒ</b> no source column (COUNT(*), constant)</span>' : ""}</div>`;
   const nT = V.tables.size, nC = V.nodes.size, nE = isT ? V.tEdges.size : V.edges.length;
@@ -691,6 +704,7 @@ function renderDetail(k) {
       + `<div class="meta" style="display:block">${files.map(f => "📄 " + fileLink(f, null)).join("<br>")}</div>`
       + (warns.length ? `<div class="meta" style="display:block;color:#e7b7b7">${warns.map(w => "⚠ " + esc(w)).join("<br>")}</div>` : "") + `</div>`;
   }
+  if (!ins.length && PROD_UP.has(t)) h += prodBlock(t, c);
   // group incoming edges by statement
   const byStmt = new Map();
   for (const e of ins) { const s = e.file + ":" + e.line; (byStmt.get(s) || byStmt.set(s, []).get(s)).push(e); }
@@ -736,6 +750,15 @@ function renderImpact(k) {
   }
   rp.innerHTML = h;
 }
+function prodBlock(t, c) {
+  // What BigQuery saw writing this table in prod; for a column, the column-level links if any.
+  const ls = PROD_UP.get(t) || [];
+  const colHits = c ? ls.flatMap(l => (l.columns || []).filter(p => p[1] === c && p[0]).map(p => [l.source_table, p[0]])) : [];
+  let h = `<div class="h">PROD LINEAGE · BIGQUERY <small>fetched ${esc(((G.prod_lineage || {}).fetched_at || "").slice(0, 10))}</small></div>`;
+  if (colHits.length) h += `<div class="blk"><div class="lbl">COLUMN IN PROD</div>${colHits.map(([st, sc]) => chipCol(key(st, sc))).join(" ")}</div>`;
+  return h + ls.map(l => `<div class="blk"><div>${chipTable(l.source_table)} ${l.in_code ? '<span style="color:var(--green)">✓ also in the SQL</span>' : '<span style="color:var(--amber)">⚠ prod only: no SQL in this repo</span>'}</div>`
+    + `<div class="meta" style="margin-top:4px">${(l.processes || []).map(p => `<span>⚙ ${esc(p.name)}</span>`).join("")}${l.last_seen ? `<span>⏱ last ${esc(l.last_seen.slice(0, 10))}</span>` : ""}</div></div>`).join("");
+}
 function renderTableDetail(t) {
   const bbs = BUILT[t]?.built_by || [], cols = [...(COLS.get(t) || [])].sort();
   const ups = tableEdgesUp(t), downs = [...(DOWN_T.get(t) || [])];
@@ -744,6 +767,7 @@ function renderTableDetail(t) {
   for (const b of bbs) h += `<div class="blk"><div class="lbl">${esc(b.statement_type)}</div><div class="meta" style="margin-top:0"><span>📄 ${fileLink(b.file, b.line)}</span>${b.dag_id ? `<span>⚙ ${esc(b.dag_id)}.${esc(b.task_id)}</span>` : ""}${b.schedule ? `<span>⏱ ${esc(schedText(b.schedule))}</span>` : ""}</div>${(b.filters || []).map(f => `<div class="flt">${hl(f)}</div>`).join("")}</div>`;
   if (ups.length) h += `<div class="h">READS FROM</div>${ups.map(chipTable).join("")}`;
   if (downs.length) h += `<div class="h">FEEDS</div>${downs.map(chipTable).join("")}`;
+  if (PROD_UP.has(t)) h += prodBlock(t);
   h += `<div class="h">COLUMNS <small>${cols.length}</small></div><table class="lv"><tr><th>COLUMN</th><th>TYPE</th><th>DESCRIPTION</th></tr>${cols.map(c => { const i = colInfo(t, c); return `<tr><td>${chipCol(key(t, c))}</td><td style="color:var(--faint)">${esc(i.type || "")}</td><td style="color:var(--dim)">${esc(i.description || "")}</td></tr>`; }).join("")}</table>`;
   rp.innerHTML = h;
 }

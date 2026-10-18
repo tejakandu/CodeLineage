@@ -6,5 +6,7 @@ config_paths: [config]          # YAML/JSON values are exposed to Jinja as param
 template_searchpath: [sql]      # where "{% include %}" and sql="x.sql" references are resolved
 schema_files: [metadata/information_schema_columns.csv]   # export of INFORMATION_SCHEMA.COLUMNS
 drop_catalog: true              # treat acme-prod.staging.t and staging.t as the same table
+# prod_lineage: .lineage/prod_lineage.json   # from `codelineage prod-lineage` (what BigQuery saw run in prod)
+# prod_dataset_suffix: _qa                   # graph datasets = prod datasets + this, if built with another env
 variables:                      # extra/override Jinja variables
   ds: "2024-01-01"

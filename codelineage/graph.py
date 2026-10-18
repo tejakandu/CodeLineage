@@ -29,6 +29,9 @@ class LineageGraph:
             self._table_cols[t].update(info.get("columns", []))
         for t, cols in data.get("schema", {}).items():   # every column the warehouse / DDL knows
             self._table_cols[t].update(cols)
+        for link in (data.get("prod_lineage") or {}).get("links", []):   # tables only prod lineage knows
+            self._table_cols[link["source_table"]]
+            self._table_cols[link["target_table"]]
 
     # ---------- persistence ----------
     @classmethod
@@ -79,6 +82,12 @@ class LineageGraph:
     def column_info(self, table: str, column: str) -> dict:
         """Type/description from INFORMATION_SCHEMA, if it was loaded."""
         return self.data.get("schema", {}).get(table, {}).get(column, {})
+
+    def prod_links(self, table: str) -> dict:
+        """Links BigQuery recorded in prod around `table` (empty without prod_lineage)."""
+        links = (self.data.get("prod_lineage") or {}).get("links", [])
+        return {"upstream": [l for l in links if l["target_table"] == table and l["source_table"] != table],
+                "downstream": [l for l in links if l["source_table"] == table and l["target_table"] != table]}
 
     def is_source(self, table: str) -> bool:
         return table not in self.tables

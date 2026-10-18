@@ -17,7 +17,9 @@ from .dag_parser import SqlTask, parse_dag_file
 from sqlglot.schema import ensure_schema
 
 from .fsutil import read_text, walk_files
+from .gcs import is_gcs
 from .graph import LineageGraph
+from . import prod_lineage
 from .schema import load_bigquery_schema, load_information_schema, referenced_names, to_sqlglot_schema
 from .sql_parser import StatementLineage, parse_sql
 from .templating import SqlRenderer, load_config_values
@@ -88,6 +90,29 @@ def _bigquery_schema(cfg: LineageConfig, warnings: list[str], bq_client=None, re
             return cached["schema"]
         warnings.append(f"BigQuery INFORMATION_SCHEMA unavailable and no cache: {e}")
         return {}
+
+
+def _table_pairs(edges: list[dict], tables: dict) -> set[tuple[str, str]]:
+    """(source, target) table pairs the SQL produces, looking through script temp tables (prod lineage
+    never shows them), plus (t, t) for every built table (prod records MERGE/UPDATE reading their target)."""
+    ups: dict[str, set[str]] = {}
+    for e in edges:
+        if e.get("source_table") and e["source_table"] != e["target_table"]:
+            ups.setdefault(e["target_table"], set()).add(e["source_table"])
+    for t, info in tables.items():
+        for b in info["built_by"]:
+            ups.setdefault(t, set()).update(s for s in b.get("source_tables", []) if s != t)
+
+    def sources(t: str, seen: set[str]) -> set[str]:
+        out = set()
+        for s in ups.get(t, ()):
+            if s in seen:
+                continue
+            seen.add(s)
+            out |= sources(s, seen) if "::" in s else {s}
+        return out
+    pairs = {(s, t) for t in ups if "::" not in t for s in sources(t, set())}
+    return pairs | {(t, t) for t in tables}
 
 
 SLOW_FILE_SECONDS = 30
@@ -269,6 +294,22 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None, refresh_schem
             warnings.append(f"{len(unknown)} source tables not in INFORMATION_SCHEMA: {', '.join(unknown[:20])}")
 
     used = {e["source_table"] for e in edges if e.get("source_table")} | {e["target_table"] for e in edges} | set(tables)
+
+    # 5. What BigQuery recorded in prod (optional): links the SQL doesn't explain are worth a look.
+    prod = None
+    if cfg.prod_lineage:
+        src = cfg.prod_lineage if is_gcs(cfg.prod_lineage) else str(cfg.repo_root / cfg.prod_lineage)
+        try:
+            data = prod_lineage.load(src)
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"prod lineage: could not read {cfg.prod_lineage} ({e})")
+        else:
+            prod = prod_lineage.merge(data, used | set(info_schema) | set(ddl), _table_pairs(edges, tables),
+                                      cfg.drop_catalog, cfg.prod_dataset_suffix)
+            prod["source"] = cfg.prod_lineage
+            warnings += [f"prod lineage: {l['source_table']} -> {l['target_table']} ran in prod "
+                         f"({', '.join(p['name'] for p in l['processes'][:2]) or 'job'}) but no SQL in this repo does it"
+                         for l in prod["links"] if not l["in_code"]]
     return LineageGraph({
         "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "repo_root": str(root),
@@ -281,6 +322,7 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None, refresh_schem
         "schema": {t: {**ddl.get(t, {}), **info_schema.get(t, {})} for t in sorted(used)
                    if t in info_schema or t in ddl},
         "warnings": warnings,
+        "prod_lineage": prod,
         "dag_scan": {"files": dag_files, "sql_tasks": len(tasks),
                      "linked": sum(1 for t in tasks if t.inline_sql) + sum(len(v) for v in tasks_by_file.values())},
     })
