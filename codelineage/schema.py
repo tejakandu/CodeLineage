@@ -91,13 +91,15 @@ _BQ_SCOPE = re.compile(r"^[a-z][a-z0-9.:-]*[a-z0-9]\.(region-[a-z0-9-]+|[A-Za-z_
 
 
 def load_bigquery_schema(scopes: list[str], drop_catalog: bool = True, client=None,
-                         project: str | None = None) -> dict[str, dict[str, dict]]:
+                         project: str | None = None, datasets=None) -> dict[str, dict[str, dict]]:
     """Reads column names, types and descriptions straight from BigQuery INFORMATION_SCHEMA.
 
     Each scope is ``project.region-xx`` (every dataset in that region) or ``project.dataset``.
     Uses COLUMN_FIELD_PATHS (top-level fields only) because it carries column descriptions.
     The query runs (and is billed) in `project` (default: the gcloud/ADC project), so that project
-    needs bigquery.jobUser; the datasets' project needs metadata read access (metadataViewer)."""
+    needs bigquery.jobUser; the datasets' project needs metadata read access (metadataViewer).
+    `datasets`, if given, limits a region scope to those dataset names: a whole region can hold
+    tens of thousands of tables the repo never touches, which is slow to fetch and to parse with."""
     from google.cloud import bigquery
 
     client = client or bigquery.Client(project=project)
@@ -112,9 +114,31 @@ def load_bigquery_schema(scopes: list[str], drop_catalog: bool = True, client=No
         # region-scoped INFORMATION_SCHEMA must run in that region (e.g. northamerica-northeast1);
         # dataset-scoped queries let BigQuery pick the dataset's location.
         location = where[len("region-"):] if where.startswith("region-") else None
-        job = client.query(sql, location=location) if location else client.query(sql)
+        kw = {"location": location} if location else {}
+        if location and datasets:
+            sql += " AND LOWER(table_schema) IN UNNEST(@datasets)"
+            kw["job_config"] = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ArrayQueryParameter("datasets", "STRING", sorted(datasets))])
+        job = client.query(sql, **kw)
         rows = job.result()   # runs in (and is billed to) the client's project
         _accumulate((dict(r.items()) for r in rows), out, drop_catalog)
+    return out
+
+
+_NAME = re.compile(r"[A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*){1,2}")
+
+
+def referenced_names(texts) -> set[str]:
+    """Every dotted name in the SQL (``ds.t``, ``project.ds.t``, also ``alias.col``), lowercased,
+    with the ``ds.t`` tail of 3-part names. A superset of the tables the SQL reads or writes, used
+    to keep only those tables of a large INFORMATION_SCHEMA."""
+    out: set[str] = set()
+    for text in texts:
+        for m in _NAME.finditer(text.replace("`", "")):
+            name = m.group(0).lower()
+            out.add(name)
+            if name.count(".") == 2:
+                out.add(name.split(".", 1)[1])
     return out
 
 

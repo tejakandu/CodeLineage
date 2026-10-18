@@ -427,15 +427,15 @@ def test_bigquery_schema_job_project(monkeypatch):
         def __init__(self, project=None):
             seen["project"] = project
 
-        def query(self, sql, location=None):
+        def query(self, sql, location=None, **kw):
             seen["sql"], seen["location"] = sql, location
             return type("J", (), {"result": lambda s: []})()
     monkeypatch.setattr(bigquery, "Client", Client)
-    load_bigquery_schema(["dp-qa-derived-e0f9.region-northamerica-northeast1"], project="dp-qa-derived-e0f9")
-    assert seen["project"] == "dp-qa-derived-e0f9"
-    assert "`dp-qa-derived-e0f9`.`region-northamerica-northeast1`.INFORMATION_SCHEMA" in seen["sql"]
+    load_bigquery_schema(["acme-data-dev.region-northamerica-northeast1"], project="acme-data-dev")
+    assert seen["project"] == "acme-data-dev"
+    assert "`acme-data-dev`.`region-northamerica-northeast1`.INFORMATION_SCHEMA" in seen["sql"]
     assert seen["location"] == "northamerica-northeast1"
-    load_bigquery_schema(["dp-qa-derived-e0f9.product_common_claim_rt_qa_sit3"])
+    load_bigquery_schema(["acme-data-dev.claims_raw"])
     assert seen["location"] is None
 
 
@@ -490,3 +490,48 @@ def test_schema_columns_are_part_of_the_table(tmp_path):
                                                            "loss_cause_code": {"type": "STRING"}}}})
     assert g.columns("ds.claim") == ["business_end_dt", "claim_id", "loss_cause_code"]
     assert "ds.claim.loss_cause_code" in g.search_columns("loss_cause")
+
+
+def test_script_variables_are_not_table_columns():
+    sql = """DECLARE lower_bound_ts, upper_bound_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
+DECLARE run_id STRING;
+INSERT INTO ds.out (id, lb, rid) SELECT a.id, lower_bound_ts, run_id FROM ds.a JOIN ds.b ON a.id = b.id;"""
+    for schema in (None, {"ds": {"a": {"id": "INT", "run_id": "STRING"}, "b": {"id": "INT"}}}):
+        (r,) = parse_sql(sql, "bigquery", schema)
+        got = {e.target_column: (e.source_table, e.source_column, e.ambiguous) for e in r.edges}
+        assert got["lb"] == (None, None, False)
+        assert not any("ambiguous" in w for w in r.warnings)
+        # a real column with the variable's name wins, as in BigQuery
+        assert got["rid"] == (("ds.a", "run_id", False) if schema else (None, None, False))
+
+
+def test_schema_narrows_unqualified_join_columns():
+    schema = {"ds": {"a": {"id": "INT", "x": "INT"}, "b": {"id": "INT", "y": "INT"}}}
+    # b.gone is not in the schema, so the schema-aware trace fails and is retried without it
+    sql = "INSERT INTO ds.out SELECT x, y, b.gone FROM ds.a JOIN ds.b USING (id) JOIN ds.c ON c.id = a.id"
+    (r,) = parse_sql(sql, "bigquery", schema)
+    srcs = {}
+    for e in r.edges:
+        srcs.setdefault(e.target_column, set()).add(e.source_table)
+    assert srcs["x"] == {"ds.a", "ds.c"} and srcs["y"] == {"ds.b", "ds.c"}   # c has no known schema
+    (r,) = parse_sql("INSERT INTO ds.out SELECT x FROM ds.a JOIN ds.b USING (id) WHERE b.gone > 0", "bigquery", schema)
+    assert [(e.source_table, e.ambiguous) for e in r.edges] == [("ds.a", False)]
+
+
+def test_bigquery_schema_only_for_referenced_datasets(tmp_path):
+    from codelineage.builder import _bigquery_schema
+    from codelineage.config import LineageConfig
+    seen = []
+
+    class Client:
+        def query(self, sql, **kw):
+            seen.append(kw)
+            return type("J", (), {"result": lambda s: []})()
+    cfg = LineageConfig(repo_root=tmp_path, schema_bigquery=["acme.region-us"])
+    _bigquery_schema(cfg, [], Client(), datasets={"raw", "mart"})
+    params = seen[0]["job_config"].query_parameters[0]
+    assert params.name == "datasets" and params.values == ["mart", "raw"]
+    _bigquery_schema(cfg, [], Client(), datasets={"raw"})            # covered by the cache
+    assert len(seen) == 1
+    _bigquery_schema(cfg, [], Client(), datasets={"raw", "staging"})  # new dataset: fetch again
+    assert len(seen) == 2

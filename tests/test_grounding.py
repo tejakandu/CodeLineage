@@ -16,10 +16,10 @@ def test_made_up_names_are_flagged_real_ones_pass():
     answer = (
         "| 0 | `mart.fct_daily_revenue.net_revenue` | `SUM(o.net_amount_usd)` | `sql/mart/fct_daily_revenue.sql` |\n"
         "| 1 | `staging.int_orders_usd.net_amount_usd` | via `o.net_amount_usd` | `dags/daily_sales_dag.py` |\n"
-        "| 2 | `fivetran.cc_exposure.coverageid` | made up | `dags/product_claims_gwcc.py` |\n"
+        "| 2 | `fivetran.cc_exposure.coverageid` | made up | `dags/claims_daily.py` |\n"
         "```mermaid\nflowchart LR\n  a[`nonexistent.inside_fence`]\n```"
     )
-    assert ungrounded_names(answer, service()) == ["fivetran.cc_exposure.coverageid", "dags/product_claims_gwcc.py"]
+    assert ungrounded_names(answer, service()) == ["fivetran.cc_exposure.coverageid", "dags/claims_daily.py"]
 
 
 class Chat:

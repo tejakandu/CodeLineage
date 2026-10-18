@@ -32,7 +32,7 @@ and gets a multi-level lineage answer plus an interactive graph.
 | `codelineage/sql_parser.py` | sqlglot (BigQuery) lineage. Batch `lineage(None, ...)`, `trim_selects=False`, one prebuilt `ensure_schema`. MERGE/UPDATE assignments, traced through `USING (subquery)`. DDL collection. |
 | `codelineage/dag_parser.py` | Static `ast` parse of Airflow DAGs: classic operators, TaskFlow `.override(task_id=...)`, module string constants, `os.path.join`/`open`, `>>` dependencies. |
 | `codelineage/templating.py` | Jinja/Airflow rendering and `${var}` placeholders. |
-| `codelineage/builder.py` | `build_graph`. Resolves DAG SQL paths (search path, tail match, basename match). Two passes: columns_only, then full. Schema priority: INFORMATION_SCHEMA, then repo DDL, then CTAS-inferred. BigQuery schema cache in `.lineage/information_schema.json` (`schema_cache_hours`, default 24; `build --refresh-schema` forces a fresh read). |
+| `codelineage/builder.py` | `build_graph`. Resolves DAG SQL paths (search path, tail match, basename match). Two passes: columns_only, then full. Schema priority: INFORMATION_SCHEMA, then repo DDL, then CTAS-inferred. BigQuery schema cache in `.lineage/information_schema.json` (`schema_cache_hours`, default 24; `build --refresh-schema` forces a fresh read). Only datasets/tables named in the SQL are fetched and kept. |
 | `codelineage/schema.py` | INFORMATION_SCHEMA from files, or live from `COLUMN_FIELD_PATHS` (region scopes pass `location=`). |
 | `codelineage/graph.py` | `LineageGraph`: trace, tree/mermaid rendering, column info. Tables include schema-only columns. |
 | `codelineage/tools.py`, `gemini_chat.py` | Gemini via google-genai on Vertex AI with automatic function calling. Grounding rules in the prompt, an `ungrounded_names` check, and a retry with tools off when an answer has no text. Default model `gemini-3.8-flash` (`gemini-2.5-*` retires 2026-10-20). |
@@ -67,11 +67,16 @@ Tests: `pytest`, all passing. They must also pass with
     the code shapes, with names changed.
   - 6 schema mismatches in one KPI table.
   - DAGs that reference SQL in other repos stay unresolved (expected).
-- **Last fixes, waiting for the user to confirm:**
-  - MERGE `USING (subquery)` produced a fake comma-joined table; it is now traced to the real
-    tables.
-  - Wide tables showed only the lineage-connected columns; all columns are now shown.
-  - The BigQuery schema cache.
+- **Latest fixes, waiting for the user to confirm:**
+  - BigQuery `DECLARE` script variables used in queries were reported as ambiguous columns. They
+    are now treated as variables.
+  - Unqualified join columns are narrowed to the candidate tables whose schema has them.
+  - INFORMATION_SCHEMA is fetched only for datasets the SQL mentions, and only referenced tables
+    are kept. A region-wide fetch was 65k tables and 347 s, and it slowed parsing.
+  - The explorer centres on the focused column in tall tables and shows a "NO LINEAGE FOUND"
+    notice on the canvas.
+- **Earlier fixes:** MERGE `USING (subquery)` tracing; all schema columns shown; the 24 h schema
+  cache.
 
 ## Working branch
 

@@ -171,18 +171,41 @@ def _query_lineage(target: str, query: exp.Query, columns: list[str], schema: Sc
             refs = list(root.expression.find_all(exp.Column))
             candidates = _physical_tables(query, drop_catalog)
             if refs and candidates:
-                # Columns sqlglot could not pin to a table (unqualified, join, no schema): keep the
-                # chain going to every candidate table, flagged so the answer can say so.
-                warnings.append(f"column {col}: unqualified reference, source table ambiguous among "
-                                f"{', '.join(candidates)} (load INFORMATION_SCHEMA to resolve)")
+                # Columns sqlglot could not pin to a table (unqualified in a join, or a table whose
+                # known columns lack it). Narrow the candidates with the schema; if more than one is
+                # left, keep the chain going to each, flagged so the answer can say so.
+                unsure = []
                 for r in refs:
-                    for cand in candidates:
-                        edges.append(ColumnEdge(target, col.lower(), cand, r.name.lower(), transformation,
-                                                ambiguous=True))
+                    name = r.name.lower()
+                    owners = _owners(name, candidates, schema, dialect)
+                    for cand in owners:
+                        edges.append(ColumnEdge(target, col.lower(), cand, name, transformation,
+                                                ambiguous=len(owners) > 1))
+                    if len(owners) > 1:
+                        unsure = owners
+                if unsure:
+                    warnings.append(f"column {col}: unqualified reference, source table ambiguous among "
+                                    f"{', '.join(unsure)} (load INFORMATION_SCHEMA to resolve)")
             else:
                 edges.append(ColumnEdge(target, col.lower(), None, None, transformation))
     outer_warnings.extend(_collapse(warnings))
     return edges
+
+
+def _owners(column: str, candidates: list[str], schema: Schema | None, dialect: str | None) -> list[str]:
+    """Candidate tables that can hold `column`: the ones whose schema has it, plus those with no
+    known schema. A single candidate is the owner even if its schema lacks the column (the build
+    then reports the column as missing from INFORMATION_SCHEMA)."""
+    if len(candidates) < 2 or schema is None:
+        return candidates
+    has, unknown = [], []
+    for cand in candidates:
+        cols = _known_columns(schema, cand, dialect)
+        if cols is None:
+            unknown.append(cand)
+        elif column in cols:
+            has.append(cand)
+    return has + unknown or candidates
 
 
 def _collapse(warnings: list[str]) -> list[str]:
@@ -459,10 +482,17 @@ def parse_sql(sql: str, dialect: str | None = None, schema: dict | Schema | None
     temps = {table_name(s.this.this if isinstance(s.this, exp.Schema) else s.this, drop_catalog)
              for s, _ in parsed if _is_temp(s)}
 
+    # BigQuery script variables (DECLARE x ...) used in a query look like unqualified columns.
+    variables = {i.name for s, _ in parsed if isinstance(s, exp.Declare)
+                 for item in s.expressions for i in (item.this if isinstance(item.this, list) else [item.this])
+                 if isinstance(i, exp.Identifier)}
+
     results = []
     for stmt, line in parsed:
         if ddl is not None:
             _collect_ddl(stmt, dialect, drop_catalog, ddl)
+        if variables:
+            _mark_variables(stmt, variables, schema, dialect, drop_catalog)
         result = _statement_lineage(stmt, dialect, schema, drop_catalog, columns_only)
         if result is None:
             continue
@@ -479,6 +509,31 @@ def parse_sql(sql: str, dialect: str | None = None, schema: dict | Schema | None
                 e.target_table = scoped(e.target_table)
                 e.source_table = scoped(e.source_table) if e.source_table else None
     return results
+
+
+def _mark_variables(stmt: exp.Expr, variables: set[str], schema: Schema | None, dialect, drop_catalog: bool) -> None:
+    """Replaces unqualified references to script variables with a variable node, so they are not
+    traced to (or reported as ambiguous among) the query's tables. A real column of a source table
+    with the same name wins, as in BigQuery."""
+    tables = None
+    for col in list(stmt.find_all(exp.Column)):
+        if col.table or col.name not in variables or not isinstance(col.this, exp.Identifier):
+            continue
+        if schema is not None:
+            if tables is None:
+                tables = _physical_tables(stmt, drop_catalog)
+            if any(col.name in (_known_columns(schema, t, dialect) or ()) for t in tables):
+                continue
+        col.replace(exp.var(col.name))
+
+
+def _known_columns(schema: Schema, table: str, dialect) -> set[str] | None:
+    """Lowercase columns of `table` in the schema, or None if the schema doesn't know the table."""
+    try:
+        t = exp.to_table(table, dialect=dialect)
+        return {c.lower() for c in schema.column_names(t)} if schema.find(t) is not None else None
+    except Exception:  # noqa: BLE001 - odd name: treat as unknown
+        return None
 
 
 def _statement_lineage(stmt: exp.Expr, dialect, schema: Schema | None, drop_catalog: bool,

@@ -84,6 +84,8 @@ aside{background:var(--panel);display:flex;flex-direction:column;min-height:0}
 .crumb .t2{font-size:17px;font-weight:800;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .crumb .t2 em{color:var(--amber);font-style:normal}
 .crumb .t3{color:var(--dim);font-size:11px;margin-top:2px}
+.crumb .t4{color:var(--amber);font-size:11px;margin-top:6px;max-width:560px}
+.crumb .t4:empty{display:none}
 .tools{position:absolute;right:12px;top:10px;display:flex;gap:6px}
 .tools button{background:#0b0f14ee;border:1px solid var(--line2);padding:4px 8px;cursor:pointer;color:var(--dim);font-size:10.5px;font-weight:700;letter-spacing:.06em}
 .tools button:hover,.tools button.on{color:var(--amber);border-color:var(--amber)}
@@ -214,7 +216,7 @@ table.lv td.l{color:var(--amber);font-weight:800;text-align:center}
       <svg id="svg"><defs>
         <marker id="arw" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#8b95a3"/></marker>
       </defs><g id="vp"><g id="edges"></g><g id="nodes"></g></g></svg>
-      <div class="crumb"><div class="t1" id="c1"></div><div class="t2" id="c2"></div><div class="t3" id="c3"></div></div>
+      <div class="crumb"><div class="t1" id="c1"></div><div class="t2" id="c2"></div><div class="t3" id="c3"></div><div class="t4" id="c4"></div></div>
       <div class="tools">
         <button id="bWide" title="Full-width canvas (Z)">⛶ WIDE</button><button id="bFit" title="Fit (F)">FIT</button><button id="bOut">−</button><button id="bIn">+</button>
         <button id="bSvg" title="Download the graph as SVG">SVG ⤓</button><button id="bMer" title="Copy as Mermaid">MERMAID ⧉</button><button id="bLink" title="Copy a link to this view">LINK ⧉</button>
@@ -533,9 +535,12 @@ function fit(all) {
   let x = (r.width - LAY.W * k) / 2, y = top + (r.height - top - 150 - LAY.H * k) / 2;
   if (!all && k < .8) {
     k = .8; const f = LAY.pos.get(VIEW.focusTable) || {x: 0, y: 0, h: 0}, usable = r.height - top - 150;
+    // a tall table (ALL COLS): centre on the focused column's row, not the middle of the table
+    const fc = VIEW.kind === "col" ? splitKey(S.focus)[1] : null;
+    const fy = fc != null && LAY.rows.get(VIEW.focusTable)?.includes(fc) ? LAY.rowY(VIEW.focusTable, fc) : f.y + f.h / 2;
     x = S.dir === "up" ? r.width - pad - (f.x + CW) * k : S.dir === "down" ? pad - f.x * k : r.width / 2 - (f.x + CW / 2) * k;
     y = LAY.H * k <= usable ? top + (usable - LAY.H * k) / 2
-      : Math.min(top, Math.max(top + usable - LAY.H * k, top + usable / 2 - (f.y + f.h / 2) * k));
+      : Math.min(top, Math.max(top + usable - LAY.H * k, top + usable / 2 - fy * k));
   }
   S.z = {k, x, y}; applyZ();
 }
@@ -590,6 +595,11 @@ function updateChrome() {
   $("#c2").innerHTML = isT ? `<em>${esc(shortT(t))}</em>` : `${esc(shortT(t))}.<em>${esc(c)}</em>`;
   const info = isT ? {} : colInfo(t, c);
   $("#c3").textContent = [info.type, info.description].filter(Boolean).join(" · ");
+  // say so on the canvas when there is nothing to draw, instead of a lone card
+  const lonely = !isT && V.nodes.size <= 1 && !V.derived.size;
+  $("#c4").textContent = !lonely ? "" : !hasLineage(S.focus)
+    ? "⚠ NO LINEAGE FOUND · no parsed SQL sets this column. DETAIL lists the files that build the table and their warnings."
+    : `No ${S.dir === "up" ? "upstream sources" : "downstream uses"} · try ${S.dir === "up" ? "DOWNSTREAM" : "UPSTREAM"} or BOTH`;
   const usedSchemas = [...new Set([...V.tables.keys()].map(schemaOf))];
   const kinds = new Set(V.edges.map(edgeKind));
   const kl = isT ? `<span><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="#6b7a8c" stroke-width="2"/></svg>table dependency</span>` :

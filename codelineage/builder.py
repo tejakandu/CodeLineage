@@ -18,7 +18,7 @@ from sqlglot.schema import ensure_schema
 
 from .fsutil import read_text, walk_files
 from .graph import LineageGraph
-from .schema import load_bigquery_schema, load_information_schema, to_sqlglot_schema
+from .schema import load_bigquery_schema, load_information_schema, referenced_names, to_sqlglot_schema
 from .sql_parser import StatementLineage, parse_sql
 from .templating import SqlRenderer, load_config_values
 
@@ -51,9 +51,10 @@ def _git_commit(root: Path) -> str | None:
 
 
 def _bigquery_schema(cfg: LineageConfig, warnings: list[str], bq_client=None, refresh: bool = False,
-                     info: dict | None = None) -> dict:
-    """INFORMATION_SCHEMA from BigQuery. Cached in .lineage/ and reused for schema_cache_hours (a
-    region-wide query can take minutes); also the fallback when BigQuery can't be reached."""
+                     info: dict | None = None, datasets: set[str] | None = None) -> dict:
+    """INFORMATION_SCHEMA from BigQuery, only for `datasets` (those the SQL mentions). Cached in
+    .lineage/ and reused for schema_cache_hours while it covers every dataset needed; also the
+    fallback when BigQuery can't be reached."""
     cache = cfg.repo_root / ".lineage" / "information_schema.json"
     cached = None
     if cache.exists():
@@ -64,17 +65,20 @@ def _bigquery_schema(cfg: LineageConfig, warnings: list[str], bq_client=None, re
         except ValueError:
             cached = None
     info = info if info is not None else {}
-    if cached and not refresh and cached.get("scopes") == cfg.schema_bigquery and cached.get("fetched_at"):
+    covers = (cached or {}).get("datasets") is None or (datasets is not None and datasets <= set(cached["datasets"]))
+    if cached and not refresh and covers and cached.get("scopes") == cfg.schema_bigquery and cached.get("fetched_at"):
         age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(cached["fetched_at"])).total_seconds() / 3600
         if age_h < cfg.schema_cache_hours:
             info.update(source="cache", fetched_at=cached["fetched_at"])
             return cached["schema"]
     try:
-        data = load_bigquery_schema(cfg.schema_bigquery, cfg.drop_catalog, bq_client, cfg.bigquery_project)
+        data = load_bigquery_schema(cfg.schema_bigquery, cfg.drop_catalog, bq_client, cfg.bigquery_project,
+                                    datasets)
         fetched = datetime.now(timezone.utc).isoformat(timespec="seconds")
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps({"fetched_at": fetched, "scopes": cfg.schema_bigquery, "schema": data}),
-                         encoding="utf-8")
+        cache.write_text(json.dumps({"fetched_at": fetched, "scopes": cfg.schema_bigquery,
+                                     "datasets": sorted(datasets) if datasets is not None else None,
+                                     "schema": data}), encoding="utf-8")
         info.update(source="bigquery", fetched_at=fetched)
         return data
     except Exception as e:  # noqa: BLE001
@@ -199,14 +203,19 @@ def build_graph(cfg: LineageConfig, bq_client=None, progress=None, refresh_schem
     #    A first parse pass learns each built table's columns so the second can expand SELECT *.
     early_warnings: list[str] = []
     schema_info: dict = {}
+    # Only tables the SQL mentions: a region-wide INFORMATION_SCHEMA can hold 60k+ tables, and a
+    # schema that size makes both the BigQuery query and every parse much slower.
+    names = referenced_names(sql for _, _, sql, _ in rendered)
+    datasets = {n.split(".")[-2] for n in names}
     info_schema = load_information_schema(cfg.resolve(cfg.schema_files), cfg.drop_catalog)
     if cfg.schema_bigquery:
         report("loading schema from BigQuery", 0, 1, ", ".join(cfg.schema_bigquery))
-        bq = _bigquery_schema(cfg, early_warnings, bq_client, refresh_schema, schema_info)
+        bq = _bigquery_schema(cfg, early_warnings, bq_client, refresh_schema, schema_info, datasets)
         report("loading schema from BigQuery", 1, 1, f"{len(bq)} tables ({schema_info.get('source', '-')})")
         for t, cols in bq.items():
             for c, info in cols.items():
                 info_schema.setdefault(t, {}).setdefault(c, info)
+    info_schema = {t: cols for t, cols in info_schema.items() if t in names}
     first, ddl = [], {}
     for i, (name, _, sql, _) in enumerate(rendered, 1):
         report("reading columns", i, len(rendered), name)
